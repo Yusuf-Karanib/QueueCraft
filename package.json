@@ -1,20 +1,45 @@
 {
-  "devDependencies": {
-    "tsup": "^8.5.1",
-    "typescript": "^5.6.3"
-  },
   "name": "queuecraft",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "version": "1.0.1",
+  "description": "Typed AWS SQS publishing and worker utilities",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
   },
-  "keywords": [],
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean --target node20",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run build",
+    "test": "npm run build"
+  },
+  "keywords": [
+    "sqs",
+    "queue",
+    "worker",
+    "aws"
+  ],
   "author": "",
   "license": "ISC",
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1092.0",
-    "@aws-sdk/client-sqs": "^3.1092.0"
+    "@aws-sdk/client-sqs": "^3.1092.0",
+    "queuecraft": "github:Yusuf-Karanib/queuecraft#main"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsup": "^8.5.1",
+    "typescript": "^5.6.3"
   }
 }
