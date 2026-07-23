@@ -1,5 +1,59 @@
-import { Message, SQSClient } from '@aws-sdk/client-sqs';
+import { SQSClient, Message } from '@aws-sdk/client-sqs';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+
+/**
+ * QueueCraft — publisher
+ *
+ * Serializes a payload and enqueues it on SQS. Every message carries a
+ * client-generated idempotency key in its attributes, so the worker can enforce
+ * exactly-once processing via the IdempotencyStore using a key the *producer*
+ * controls — independent of the SQS-assigned MessageId.
+ */
+
+/**
+ * Message-attribute name carrying QueueCraft's idempotency key.
+ *
+ * Import this in the worker so producer and consumer agree on the name. The
+ * poller must (a) request it on receive via `MessageAttributeNames` and
+ * (b) use its value as the `acquireLock` key.
+ */
+declare const IDEMPOTENCY_ATTRIBUTE = "MessageId";
+interface QueueCraftPublisherOptions {
+    /** A configured SQS client (region/credentials handled by the caller). */
+    readonly sqsClient: SQSClient;
+    /** Full URL of the destination SQS queue. */
+    readonly queueUrl: string;
+    /** Override the attribute name used for the idempotency key. */
+    readonly idempotencyAttribute?: string;
+}
+/** Optional per-message knobs. */
+interface PublishOptions {
+    /** Delay before the message becomes visible, in seconds (0–900). Standard queues only. */
+    readonly delaySeconds?: number;
+    /** FIFO only: partitions ordering. Required when publishing to a `.fifo` queue. */
+    readonly messageGroupId?: string;
+    /** FIFO only: deduplication id. Defaults to the generated idempotency key. */
+    readonly deduplicationId?: string;
+}
+interface PublishResult {
+    /** Client-generated idempotency key placed in the message attributes. */
+    readonly messageId: string;
+    /** SQS-assigned message id (distinct from `messageId`), if returned. */
+    readonly sqsMessageId?: string;
+}
+declare class QueueCraftPublisher {
+    private readonly sqs;
+    private readonly queueUrl;
+    private readonly idempotencyAttribute;
+    private readonly isFifo;
+    constructor(options: QueueCraftPublisherOptions);
+    /**
+     * Serialize and enqueue a payload. Generates a unique idempotency key,
+     * attaches it as a message attribute, and returns it to the caller so the
+     * publish can be correlated or safely retried.
+     */
+    publish(payload: unknown, options?: PublishOptions): Promise<PublishResult>;
+}
 
 /**
  * QueueCraft — core type definitions
@@ -253,4 +307,4 @@ declare class QueueCraftPoller {
     private sleep;
 }
 
-export { type EpochMillis, IdempotencyStore, type IdempotencyStoreOptions, type Job, type JobHandler, type JobStatus, LeaseState, type QueueCraftConfig, QueueCraftPoller, type QueueCraftPollerOptions, Semaphore, type WorkerOptions };
+export { type EpochMillis, IDEMPOTENCY_ATTRIBUTE, IdempotencyStore, type IdempotencyStoreOptions, type Job, type JobHandler, type JobStatus, LeaseState, type PublishOptions, type PublishResult, type QueueCraftConfig, QueueCraftPoller, type QueueCraftPollerOptions, QueueCraftPublisher, type QueueCraftPublisherOptions, Semaphore, type WorkerOptions };

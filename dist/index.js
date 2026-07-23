@@ -1,33 +1,63 @@
-var __defProp = Object.defineProperty;
-var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
-var __getOwnPropNames = Object.getOwnPropertyNames;
-var __hasOwnProp = Object.prototype.hasOwnProperty;
-var __export = (target, all) => {
-  for (var name in all)
-    __defProp(target, name, { get: all[name], enumerable: true });
-};
-var __copyProps = (to, from, except, desc) => {
-  if (from && typeof from === "object" || typeof from === "function") {
-    for (let key of __getOwnPropNames(from))
-      if (!__hasOwnProp.call(to, key) && key !== except)
-        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+// src/publisher.ts
+import {
+  SendMessageCommand
+} from "@aws-sdk/client-sqs";
+import { randomUUID } from "crypto";
+var IDEMPOTENCY_ATTRIBUTE = "MessageId";
+var QueueCraftPublisher = class {
+  sqs;
+  queueUrl;
+  idempotencyAttribute;
+  isFifo;
+  constructor(options) {
+    if (!options.queueUrl) {
+      throw new Error("QueueCraftPublisher requires a non-empty queueUrl.");
+    }
+    this.sqs = options.sqsClient;
+    this.queueUrl = options.queueUrl;
+    this.idempotencyAttribute = options.idempotencyAttribute ?? IDEMPOTENCY_ATTRIBUTE;
+    this.isFifo = options.queueUrl.endsWith(".fifo");
   }
-  return to;
+  /**
+   * Serialize and enqueue a payload. Generates a unique idempotency key,
+   * attaches it as a message attribute, and returns it to the caller so the
+   * publish can be correlated or safely retried.
+   */
+  async publish(payload, options = {}) {
+    const body = JSON.stringify(payload);
+    if (body === void 0) {
+      throw new TypeError(
+        "publish(payload): payload must be JSON-serializable and not undefined."
+      );
+    }
+    const messageId = randomUUID();
+    const attributes = {
+      [this.idempotencyAttribute]: {
+        DataType: "String",
+        StringValue: messageId
+      }
+    };
+    const result = await this.sqs.send(
+      new SendMessageCommand({
+        QueueUrl: this.queueUrl,
+        MessageBody: body,
+        MessageAttributes: attributes,
+        // Per-message delay is a standard-queue feature only.
+        DelaySeconds: this.isFifo ? void 0 : options.delaySeconds,
+        // FIFO-only fields; omitted entirely for standard queues.
+        MessageGroupId: this.isFifo ? options.messageGroupId : void 0,
+        MessageDeduplicationId: this.isFifo ? options.deduplicationId ?? messageId : void 0
+      })
+    );
+    return { messageId, sqsMessageId: result.MessageId };
+  }
 };
-var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
-
-// src/index.ts
-var index_exports = {};
-__export(index_exports, {
-  IdempotencyStore: () => IdempotencyStore,
-  LeaseState: () => LeaseState,
-  QueueCraftPoller: () => QueueCraftPoller,
-  Semaphore: () => Semaphore
-});
-module.exports = __toCommonJS(index_exports);
 
 // src/poller.ts
-var import_client_sqs = require("@aws-sdk/client-sqs");
+import {
+  ReceiveMessageCommand,
+  DeleteMessageCommand
+} from "@aws-sdk/client-sqs";
 var MAX_SQS_BATCH = 10;
 var QueueCraftPoller = class {
   sqs;
@@ -64,7 +94,6 @@ var QueueCraftPoller = class {
    * loop has exited and all in-flight jobs have drained.
    */
   async start() {
-    var _a;
     if (this.running) return;
     this.running = true;
     while (this.running) {
@@ -78,7 +107,7 @@ var QueueCraftPoller = class {
         messages = await this.receive(capacity);
       } catch (err) {
         if (!this.running) break;
-        (_a = this.onError) == null ? void 0 : _a.call(this, err);
+        this.onError?.(err);
         await this.sleep(this.pollIntervalMs);
         continue;
       }
@@ -90,9 +119,8 @@ var QueueCraftPoller = class {
   }
   /** Signal the loop to stop, interrupt any in-flight long poll, and drain. */
   async stop() {
-    var _a;
     this.running = false;
-    (_a = this.abortController) == null ? void 0 : _a.abort();
+    this.abortController?.abort();
     await this.drain();
   }
   /** Free slots = ceiling minus in-use, clamped to the SQS batch limit. */
@@ -104,7 +132,7 @@ var QueueCraftPoller = class {
   async receive(max) {
     this.abortController = new AbortController();
     const result = await this.sqs.send(
-      new import_client_sqs.ReceiveMessageCommand({
+      new ReceiveMessageCommand({
         QueueUrl: this.queueUrl,
         MaxNumberOfMessages: max,
         WaitTimeSeconds: this.waitTimeSeconds
@@ -128,12 +156,10 @@ var QueueCraftPoller = class {
     }
   }
   async process(message) {
-    var _a, _b, _c;
     const messageId = message.MessageId;
     const receiptHandle = message.ReceiptHandle;
     if (!messageId || !receiptHandle) {
-      (_a = this.onError) == null ? void 0 : _a.call(
-        this,
+      this.onError?.(
         new Error("SQS message missing MessageId or ReceiptHandle"),
         message
       );
@@ -147,30 +173,29 @@ var QueueCraftPoller = class {
       await this.handler(message);
     } catch (err) {
       await this.safeRelease(messageId);
-      (_b = this.onError) == null ? void 0 : _b.call(this, err, message);
+      this.onError?.(err, message);
       return;
     }
     try {
       await this.deleteMessage(receiptHandle);
       await this.idempotency.markComplete(messageId);
     } catch (err) {
-      (_c = this.onError) == null ? void 0 : _c.call(this, err, message);
+      this.onError?.(err, message);
     }
   }
   async deleteMessage(receiptHandle) {
     await this.sqs.send(
-      new import_client_sqs.DeleteMessageCommand({
+      new DeleteMessageCommand({
         QueueUrl: this.queueUrl,
         ReceiptHandle: receiptHandle
       })
     );
   }
   async safeRelease(messageId) {
-    var _a;
     try {
       await this.idempotency.releaseLock(messageId);
     } catch (err) {
-      (_a = this.onError) == null ? void 0 : _a.call(this, err);
+      this.onError?.(err);
     }
   }
   async drain() {
@@ -255,7 +280,12 @@ var Semaphore = class {
 };
 
 // src/idempotency.ts
-var import_client_dynamodb = require("@aws-sdk/client-dynamodb");
+import {
+  PutItemCommand,
+  UpdateItemCommand,
+  DeleteItemCommand,
+  ConditionalCheckFailedException
+} from "@aws-sdk/client-dynamodb";
 var LeaseState = {
   Pending: "PENDING",
   Completed: "COMPLETED",
@@ -298,7 +328,7 @@ var IdempotencyStore = class {
     }
     try {
       await this.client.send(
-        new import_client_dynamodb.PutItemCommand({
+        new PutItemCommand({
           TableName: this.tableName,
           Item: item,
           ConditionExpression: "attribute_not_exists(messageId)"
@@ -306,7 +336,7 @@ var IdempotencyStore = class {
       );
       return true;
     } catch (err) {
-      if (err instanceof import_client_dynamodb.ConditionalCheckFailedException) {
+      if (err instanceof ConditionalCheckFailedException) {
         return false;
       }
       throw err;
@@ -337,7 +367,7 @@ var IdempotencyStore = class {
    */
   async releaseLock(messageId) {
     await this.client.send(
-      new import_client_dynamodb.DeleteItemCommand({
+      new DeleteItemCommand({
         TableName: this.tableName,
         Key: { messageId: { S: messageId } }
       })
@@ -346,7 +376,7 @@ var IdempotencyStore = class {
   /** Shared transition to a terminal state; clears the pending-lease TTL. */
   async transition(messageId, state) {
     await this.client.send(
-      new import_client_dynamodb.UpdateItemCommand({
+      new UpdateItemCommand({
         TableName: this.tableName,
         Key: { messageId: { S: messageId } },
         UpdateExpression: "SET #state = :state, #updatedAt = :updatedAt REMOVE expiresAt",
@@ -363,10 +393,11 @@ var IdempotencyStore = class {
     );
   }
 };
-// Annotate the CommonJS export names for ESM import in node:
-0 && (module.exports = {
+export {
+  IDEMPOTENCY_ATTRIBUTE,
   IdempotencyStore,
   LeaseState,
   QueueCraftPoller,
+  QueueCraftPublisher,
   Semaphore
-});
+};
