@@ -18,7 +18,7 @@ Parameters:
 
   VisibilityTimeoutSeconds:
     Type: Number
-    Default: 60
+    Default: 180
     MinValue: 1
     MaxValue: 43200
     Description: Initial time a received job remains hidden from other workers.
@@ -124,11 +124,36 @@ Resources:
         - - !Ref AlarmTopic
         - !Ref AWS::NoValue
 
+  JobQueueAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-${Environment}-oldest-job"
+      AlarmDescription: A QueueCraft job has remained unfinished for more than five minutes.
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt JobQueue.QueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 300
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmEmail
+        - - !Ref AlarmTopic
+        - !Ref AWS::NoValue
+
   IdempotencyTable:
     Type: AWS::DynamoDB::Table
     Properties:
       TableName: !Sub "${ProjectName}-${Environment}-leases"
-      BillingMode: PAY_PER_REQUEST
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
       AttributeDefinitions:
         - AttributeName: messageId
           AttributeType: S
@@ -213,6 +238,9 @@ Outputs:
 
   DeadLetterAlarmName:
     Value: !Ref DeadLetterQueueAlarm
+
+  JobQueueAgeAlarmName:
+    Value: !Ref JobQueueAgeAlarm
 
   AlarmTopicArn:
     Condition: HasAlarmEmail

@@ -8,10 +8,13 @@ The CloudFormation template creates the first real QueueCraft environment:
 - One publisher IAM policy
 - One worker IAM policy
 - One dead-letter queue alarm
+- One alarm for jobs that remain unfinished for more than five minutes
 - An optional encrypted SNS topic and email subscription for that alarm
 
-The queue and table use AWS-managed encryption. DynamoDB uses on-demand billing,
-and paid point-in-time recovery is disabled by default.
+The queue and table use AWS-managed encryption. DynamoDB starts at five provisioned
+read and write units so a small batch does not immediately throttle while the pilot
+can remain inside the standard free allowance.
+Paid point-in-time recovery is disabled by default.
 
 ## Important boundary
 
@@ -38,10 +41,11 @@ The important outputs are:
 - `ProducerPolicyArn`
 - `ConsumerPolicyArn`
 - `DeadLetterAlarmName`
+- `JobQueueAgeAlarmName`
 - `AlarmTopicArn` when an alarm email was provided
 
-Creating the resources does not start a worker. A separate Node.js process must
-construct `QueueCraftPoller` and keep `start()` running.
+Creating the resources does not start a worker. A separate consumer, such as an
+SQS-triggered Lambda function, must use the queue and table outputs.
 
 ## Queue choice
 
