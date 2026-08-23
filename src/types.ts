@@ -71,6 +71,12 @@ export interface WorkerOptions {
   /** Messages requested per poll. Valid range: 1–10. */
   readonly batchSize?: number;
 
-  /** Maximum attempts before a job is marked `failed`. */
-  readonly maxRetries?: number;
+  /** Per-receive SQS visibility timeout. Valid range: 1–43,200 seconds. */
+  readonly visibilityTimeoutSeconds?: number;
+
+  /**
+   * How often the worker renews SQS visibility and the DynamoDB lease.
+   * Must be shorter than the visibility timeout. Defaults to half of it.
+   */
+  readonly heartbeatIntervalMs?: number;
 }

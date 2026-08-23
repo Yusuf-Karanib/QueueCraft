@@ -33,6 +33,11 @@ export class Semaphore {
     return this.active;
   }
 
+  /** Maximum number of permits this semaphore can issue. */
+  get capacity(): number {
+    return this.maxConcurrency;
+  }
+
   /** Number of callers queued and waiting for a permit. */
   get pendingCount(): number {
     return this.waiters.length;

@@ -3,7 +3,7 @@ import {
   SendMessageCommand
 } from "@aws-sdk/client-sqs";
 import { randomUUID } from "crypto";
-var IDEMPOTENCY_ATTRIBUTE = "MessageId";
+var IDEMPOTENCY_ATTRIBUTE = "QueueCraftIdempotencyKey";
 var QueueCraftPublisher = class {
   sqs;
   queueUrl;
@@ -30,7 +30,10 @@ var QueueCraftPublisher = class {
         "publish(payload): payload must be JSON-serializable and not undefined."
       );
     }
-    const messageId = randomUUID();
+    const messageId = options.idempotencyKey ?? randomUUID();
+    if (!messageId) {
+      throw new TypeError("idempotencyKey must be a non-empty string.");
+    }
     const attributes = {
       [this.idempotencyAttribute]: {
         DataType: "String",
@@ -55,9 +58,11 @@ var QueueCraftPublisher = class {
 
 // src/poller.ts
 import {
+  ChangeMessageVisibilityCommand,
   ReceiveMessageCommand,
   DeleteMessageCommand
 } from "@aws-sdk/client-sqs";
+import { randomUUID as randomUUID2 } from "crypto";
 var MAX_SQS_BATCH = 10;
 var QueueCraftPoller = class {
   sqs;
@@ -66,13 +71,17 @@ var QueueCraftPoller = class {
   queueUrl;
   handler;
   onError;
+  idempotencyAttribute;
   maxConcurrency;
   pollIntervalMs;
   waitTimeSeconds;
   batchSize;
+  visibilityTimeoutSeconds;
+  heartbeatIntervalMs;
   running = false;
   inflight = /* @__PURE__ */ new Set();
   abortController;
+  activeReceive;
   constructor(options) {
     this.sqs = options.sqsClient;
     this.semaphore = options.semaphore;
@@ -80,10 +89,14 @@ var QueueCraftPoller = class {
     this.queueUrl = options.queueUrl;
     this.handler = options.handler;
     this.onError = options.onError;
+    this.idempotencyAttribute = options.idempotencyAttribute ?? IDEMPOTENCY_ATTRIBUTE;
     this.maxConcurrency = options.worker.concurrency;
     this.pollIntervalMs = options.worker.pollIntervalMs;
     this.waitTimeSeconds = options.worker.waitTimeSeconds ?? 20;
     this.batchSize = options.worker.batchSize ?? MAX_SQS_BATCH;
+    this.visibilityTimeoutSeconds = options.worker.visibilityTimeoutSeconds ?? 60;
+    this.heartbeatIntervalMs = options.worker.heartbeatIntervalMs ?? Math.floor(this.visibilityTimeoutSeconds * 1e3 / 2);
+    this.validateOptions(options.worker.concurrency);
   }
   /** Whether the poll loop is currently active. */
   get isRunning() {
@@ -107,9 +120,13 @@ var QueueCraftPoller = class {
         messages = await this.receive(capacity);
       } catch (err) {
         if (!this.running) break;
-        this.onError?.(err);
+        this.reportError(err);
         await this.sleep(this.pollIntervalMs);
         continue;
+      }
+      if (!this.running) {
+        await this.returnUnstartedMessages(messages);
+        break;
       }
       for (const message of messages) {
         this.dispatch(message);
@@ -121,6 +138,7 @@ var QueueCraftPoller = class {
   async stop() {
     this.running = false;
     this.abortController?.abort();
+    await this.activeReceive?.catch(() => void 0);
     await this.drain();
   }
   /** Free slots = ceiling minus in-use, clamped to the SQS batch limit. */
@@ -131,20 +149,32 @@ var QueueCraftPoller = class {
   }
   async receive(max) {
     this.abortController = new AbortController();
-    const result = await this.sqs.send(
+    const request = this.sqs.send(
       new ReceiveMessageCommand({
         QueueUrl: this.queueUrl,
         MaxNumberOfMessages: max,
-        WaitTimeSeconds: this.waitTimeSeconds
+        WaitTimeSeconds: this.waitTimeSeconds,
+        VisibilityTimeout: this.visibilityTimeoutSeconds,
+        MessageAttributeNames: [this.idempotencyAttribute],
+        MessageSystemAttributeNames: ["ApproximateReceiveCount"]
       }),
       { abortSignal: this.abortController.signal }
-    );
-    return result.Messages ?? [];
+    ).then((result) => result.Messages ?? []);
+    this.activeReceive = request;
+    try {
+      return await request;
+    } finally {
+      if (this.activeReceive === request) {
+        this.activeReceive = void 0;
+      }
+    }
   }
   dispatch(message) {
-    const task = this.runWithSlot(message);
+    const task = this.runWithSlot(message).catch((error) => {
+      this.reportError(error, message);
+    });
     this.inflight.add(task);
-    void task.finally(() => this.inflight.delete(task));
+    void task.then(() => this.inflight.delete(task));
   }
   /** Hold a concurrency slot for the full lifetime of one message. */
   async runWithSlot(message) {
@@ -159,28 +189,65 @@ var QueueCraftPoller = class {
     const messageId = message.MessageId;
     const receiptHandle = message.ReceiptHandle;
     if (!messageId || !receiptHandle) {
-      this.onError?.(
+      this.reportError(
         new Error("SQS message missing MessageId or ReceiptHandle"),
         message
       );
       return;
     }
-    const acquired = await this.idempotency.acquireLock(messageId);
-    if (!acquired) {
-      return;
-    }
-    try {
-      await this.handler(message);
-    } catch (err) {
-      await this.safeRelease(messageId);
-      this.onError?.(err, message);
-      return;
-    }
-    try {
+    const idempotencyKey = message.MessageAttributes?.[this.idempotencyAttribute]?.StringValue ?? messageId;
+    const ownerId = randomUUID2();
+    const acquisition = await this.idempotency.acquireLock(
+      idempotencyKey,
+      ownerId
+    );
+    if (acquisition.status === "completed") {
       await this.deleteMessage(receiptHandle);
-      await this.idempotency.markComplete(messageId);
+      return;
+    }
+    if (acquisition.status !== "acquired") {
+      return;
+    }
+    const lease = acquisition.lease;
+    const handlerController = new AbortController();
+    const heartbeatController = new AbortController();
+    let heartbeatError;
+    const heartbeat = this.runHeartbeat(
+      lease,
+      receiptHandle,
+      heartbeatController.signal
+    ).catch((error) => {
+      heartbeatError = error;
+      handlerController.abort(error);
+      this.reportError(error, message);
+    });
+    const attempt = this.receiveCount(message);
+    let handlerError;
+    try {
+      await this.handler(message, {
+        idempotencyKey,
+        attempt,
+        signal: handlerController.signal
+      });
+    } catch (error) {
+      handlerError = error;
+    } finally {
+      heartbeatController.abort();
+      await heartbeat;
+    }
+    if (heartbeatError !== void 0) {
+      return;
+    }
+    if (handlerError !== void 0) {
+      await this.safeRelease(lease);
+      this.reportError(handlerError, message);
+      return;
+    }
+    try {
+      await this.idempotency.markComplete(lease);
+      await this.deleteMessage(receiptHandle);
     } catch (err) {
-      this.onError?.(err, message);
+      this.reportError(err, message);
     }
   }
   async deleteMessage(receiptHandle) {
@@ -191,11 +258,96 @@ var QueueCraftPoller = class {
       })
     );
   }
-  async safeRelease(messageId) {
+  async changeVisibility(receiptHandle, visibilityTimeout = this.visibilityTimeoutSeconds) {
+    await this.sqs.send(
+      new ChangeMessageVisibilityCommand({
+        QueueUrl: this.queueUrl,
+        ReceiptHandle: receiptHandle,
+        VisibilityTimeout: visibilityTimeout
+      })
+    );
+  }
+  async runHeartbeat(lease, receiptHandle, signal) {
+    while (await this.waitForHeartbeat(signal)) {
+      await this.idempotency.renewLease(lease);
+      await this.changeVisibility(receiptHandle);
+    }
+  }
+  waitForHeartbeat(signal) {
+    if (signal.aborted) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(true);
+      }, this.heartbeatIntervalMs);
+      const onAbort = () => {
+        clearTimeout(timeout);
+        resolve(false);
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+  receiveCount(message) {
+    const parsed = Number(message.Attributes?.ApproximateReceiveCount ?? "1");
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : 1;
+  }
+  async returnUnstartedMessages(messages) {
+    const returns = messages.flatMap(
+      (message) => message.ReceiptHandle ? [this.changeVisibility(message.ReceiptHandle, 0)] : []
+    );
+    const results = await Promise.allSettled(returns);
+    for (const result of results) {
+      if (result.status === "rejected") {
+        this.reportError(result.reason);
+      }
+    }
+  }
+  async safeRelease(lease) {
     try {
-      await this.idempotency.releaseLock(messageId);
+      await this.idempotency.releaseLock(lease);
     } catch (err) {
-      this.onError?.(err);
+      this.reportError(err);
+    }
+  }
+  validateOptions(concurrency) {
+    this.assertIntegerInRange(concurrency, "concurrency", 1, Number.MAX_SAFE_INTEGER);
+    if (concurrency !== this.semaphore.capacity) {
+      throw new RangeError(
+        "worker.concurrency must match the injected Semaphore capacity."
+      );
+    }
+    this.assertIntegerInRange(
+      this.pollIntervalMs,
+      "pollIntervalMs",
+      0,
+      Number.MAX_SAFE_INTEGER
+    );
+    this.assertIntegerInRange(this.waitTimeSeconds, "waitTimeSeconds", 0, 20);
+    this.assertIntegerInRange(this.batchSize, "batchSize", 1, MAX_SQS_BATCH);
+    this.assertIntegerInRange(
+      this.visibilityTimeoutSeconds,
+      "visibilityTimeoutSeconds",
+      1,
+      43200
+    );
+    this.assertIntegerInRange(
+      this.heartbeatIntervalMs,
+      "heartbeatIntervalMs",
+      1,
+      this.visibilityTimeoutSeconds * 1e3 - 1
+    );
+  }
+  assertIntegerInRange(value, name, minimum, maximum) {
+    if (!Number.isInteger(value) || value < minimum || value > maximum) {
+      throw new RangeError(
+        `${name} must be an integer between ${minimum} and ${maximum}.`
+      );
+    }
+  }
+  reportError(error, message) {
+    try {
+      this.onError?.(error, message);
+    } catch {
     }
   }
   async drain() {
@@ -229,6 +381,10 @@ var Semaphore = class {
   /** Number of tasks currently holding a permit. */
   get activeCount() {
     return this.active;
+  }
+  /** Maximum number of permits this semaphore can issue. */
+  get capacity() {
+    return this.maxConcurrency;
   }
   /** Number of callers queued and waiting for a permit. */
   get pendingCount() {
@@ -281,116 +437,196 @@ var Semaphore = class {
 
 // src/idempotency.ts
 import {
-  PutItemCommand,
-  UpdateItemCommand,
+  ConditionalCheckFailedException,
   DeleteItemCommand,
-  ConditionalCheckFailedException
+  GetItemCommand,
+  UpdateItemCommand
 } from "@aws-sdk/client-dynamodb";
 var LeaseState = {
-  Pending: "PENDING",
+  InProgress: "IN_PROGRESS",
   Completed: "COMPLETED",
   Failed: "FAILED"
 };
+var DEFAULT_LEASE_SECONDS = 60;
+var DEFAULT_RECORD_TTL_SECONDS = 14 * 24 * 60 * 60;
 var IdempotencyStore = class {
   client;
   tableName;
-  leaseTtlSeconds;
+  leaseDurationSeconds;
+  recordTtlSeconds;
+  now;
   constructor(options) {
     if (!options.tableName) {
       throw new Error("IdempotencyStore requires a non-empty tableName.");
     }
+    this.leaseDurationSeconds = options.leaseDurationSeconds ?? DEFAULT_LEASE_SECONDS;
+    this.recordTtlSeconds = options.recordTtlSeconds ?? DEFAULT_RECORD_TTL_SECONDS;
+    if (!Number.isInteger(this.leaseDurationSeconds) || this.leaseDurationSeconds < 1) {
+      throw new RangeError("leaseDurationSeconds must be a positive integer.");
+    }
+    if (!Number.isInteger(this.recordTtlSeconds) || this.recordTtlSeconds < 1) {
+      throw new RangeError("recordTtlSeconds must be a positive integer.");
+    }
     this.client = options.client;
     this.tableName = options.tableName;
-    this.leaseTtlSeconds = options.leaseTtlSeconds;
+    this.now = options.now ?? Date.now;
   }
-  /**
-   * Attempt to claim an exclusive lease for `messageId`.
-   *
-   * Backed by a conditional `PutItem` that only writes when no record exists,
-   * so concurrent workers racing on the same message are resolved atomically
-   * by DynamoDB — exactly one wins.
-   *
-   * @returns `true` if the lease was acquired, `false` if it already exists
-   *          (i.e. the message is in-flight, completed, or failed elsewhere).
-   */
-  async acquireLock(messageId) {
-    const now = Date.now();
-    const item = {
-      messageId: { S: messageId },
-      state: { S: LeaseState.Pending },
-      createdAt: { N: String(now) },
-      updatedAt: { N: String(now) }
-    };
-    if (this.leaseTtlSeconds !== void 0) {
-      item.expiresAt = {
-        N: String(Math.floor(now / 1e3) + this.leaseTtlSeconds)
-      };
-    }
-    try {
-      await this.client.send(
-        new PutItemCommand({
-          TableName: this.tableName,
-          Item: item,
-          ConditionExpression: "attribute_not_exists(messageId)"
-        })
-      );
-      return true;
-    } catch (err) {
-      if (err instanceof ConditionalCheckFailedException) {
-        return false;
+  /** Claim a new job or take over an expired IN_PROGRESS lease. */
+  async acquireLock(messageId, ownerId) {
+    this.assertIdentifier(messageId, "messageId");
+    this.assertIdentifier(ownerId, "ownerId");
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const nowSeconds = Math.floor(this.now() / 1e3);
+      const leaseUntil = nowSeconds + this.leaseDurationSeconds;
+      try {
+        await this.client.send(
+          new UpdateItemCommand({
+            TableName: this.tableName,
+            Key: { messageId: { S: messageId } },
+            UpdateExpression: "SET #state = :inProgress, #ownerId = :ownerId, #leaseUntil = :leaseUntil, #updatedAt = :now, #createdAt = if_not_exists(#createdAt, :now), #expiresAt = :expiresAt",
+            ConditionExpression: "attribute_not_exists(messageId) OR (#state = :inProgress AND #leaseUntil <= :now)",
+            ExpressionAttributeNames: {
+              "#state": "state",
+              "#ownerId": "ownerId",
+              "#leaseUntil": "leaseUntil",
+              "#updatedAt": "updatedAt",
+              "#createdAt": "createdAt",
+              "#expiresAt": "expiresAt"
+            },
+            ExpressionAttributeValues: {
+              ":inProgress": { S: LeaseState.InProgress },
+              ":ownerId": { S: ownerId },
+              ":leaseUntil": { N: String(leaseUntil) },
+              ":now": { N: String(nowSeconds) },
+              ":expiresAt": {
+                N: String(nowSeconds + this.recordTtlSeconds)
+              }
+            }
+          })
+        );
+        return {
+          status: "acquired",
+          lease: { messageId, ownerId }
+        };
+      } catch (error) {
+        if (!(error instanceof ConditionalCheckFailedException)) {
+          throw error;
+        }
+        const existingState = await this.readState(messageId);
+        if (existingState === void 0) {
+          continue;
+        }
+        return { status: this.toAcquireStatus(existingState) };
       }
-      throw err;
     }
+    return { status: "in_progress" };
   }
-  /**
-   * Mark a lease `COMPLETED` (terminal success). Also clears the TTL so the
-   * record persists as a tombstone and future duplicate deliveries of the same
-   * message are rejected by `acquireLock`.
-   *
-   * Guarded by `attribute_exists` so a lost/expired lease surfaces as an error
-   * rather than silently resurrecting the record.
-   */
-  async markComplete(messageId) {
-    await this.transition(messageId, LeaseState.Completed);
-  }
-  /**
-   * Mark a lease `FAILED` (terminal failure). Like `markComplete`, the record
-   * is kept as a tombstone; route these to your dead-letter handling.
-   */
-  async markFailed(messageId) {
-    await this.transition(messageId, LeaseState.Failed);
-  }
-  /**
-   * Delete the lease so the job becomes eligible for reprocessing. Use this on
-   * transient failures or during graceful shutdown. `DeleteItem` is idempotent,
-   * so calling it on a missing record is a safe no-op.
-   */
-  async releaseLock(messageId) {
-    await this.client.send(
-      new DeleteItemCommand({
-        TableName: this.tableName,
-        Key: { messageId: { S: messageId } }
-      })
-    );
-  }
-  /** Shared transition to a terminal state; clears the pending-lease TTL. */
-  async transition(messageId, state) {
+  async renewLease(lease) {
+    const nowSeconds = Math.floor(this.now() / 1e3);
     await this.client.send(
       new UpdateItemCommand({
         TableName: this.tableName,
-        Key: { messageId: { S: messageId } },
-        UpdateExpression: "SET #state = :state, #updatedAt = :updatedAt REMOVE expiresAt",
-        ConditionExpression: "attribute_exists(messageId)",
+        Key: { messageId: { S: lease.messageId } },
+        UpdateExpression: "SET #leaseUntil = :leaseUntil, #updatedAt = :now, #expiresAt = :expiresAt",
+        ConditionExpression: "#state = :inProgress AND #ownerId = :ownerId",
         ExpressionAttributeNames: {
           "#state": "state",
-          "#updatedAt": "updatedAt"
+          "#ownerId": "ownerId",
+          "#leaseUntil": "leaseUntil",
+          "#updatedAt": "updatedAt",
+          "#expiresAt": "expiresAt"
         },
         ExpressionAttributeValues: {
-          ":state": { S: state },
-          ":updatedAt": { N: String(Date.now()) }
+          ":inProgress": { S: LeaseState.InProgress },
+          ":ownerId": { S: lease.ownerId },
+          ":leaseUntil": {
+            N: String(nowSeconds + this.leaseDurationSeconds)
+          },
+          ":now": { N: String(nowSeconds) },
+          ":expiresAt": {
+            N: String(nowSeconds + this.recordTtlSeconds)
+          }
         }
       })
     );
+  }
+  async markComplete(lease) {
+    await this.transition(lease, LeaseState.Completed);
+  }
+  async markFailed(lease) {
+    await this.transition(lease, LeaseState.Failed);
+  }
+  async releaseLock(lease) {
+    await this.client.send(
+      new DeleteItemCommand({
+        TableName: this.tableName,
+        Key: { messageId: { S: lease.messageId } },
+        ConditionExpression: "#state = :inProgress AND #ownerId = :ownerId",
+        ExpressionAttributeNames: {
+          "#state": "state",
+          "#ownerId": "ownerId"
+        },
+        ExpressionAttributeValues: {
+          ":inProgress": { S: LeaseState.InProgress },
+          ":ownerId": { S: lease.ownerId }
+        }
+      })
+    );
+  }
+  async transition(lease, state) {
+    const nowSeconds = Math.floor(this.now() / 1e3);
+    await this.client.send(
+      new UpdateItemCommand({
+        TableName: this.tableName,
+        Key: { messageId: { S: lease.messageId } },
+        UpdateExpression: "SET #state = :state, #updatedAt = :now, #expiresAt = :expiresAt REMOVE #ownerId, #leaseUntil",
+        ConditionExpression: "#state = :inProgress AND #ownerId = :ownerId",
+        ExpressionAttributeNames: {
+          "#state": "state",
+          "#ownerId": "ownerId",
+          "#leaseUntil": "leaseUntil",
+          "#updatedAt": "updatedAt",
+          "#expiresAt": "expiresAt"
+        },
+        ExpressionAttributeValues: {
+          ":state": { S: state },
+          ":inProgress": { S: LeaseState.InProgress },
+          ":ownerId": { S: lease.ownerId },
+          ":now": { N: String(nowSeconds) },
+          ":expiresAt": {
+            N: String(nowSeconds + this.recordTtlSeconds)
+          }
+        }
+      })
+    );
+  }
+  async readState(messageId) {
+    const result = await this.client.send(
+      new GetItemCommand({
+        TableName: this.tableName,
+        Key: { messageId: { S: messageId } },
+        ConsistentRead: true,
+        ProjectionExpression: "#state",
+        ExpressionAttributeNames: { "#state": "state" }
+      })
+    );
+    const state = result.Item?.state?.S;
+    return Object.values(LeaseState).includes(state) ? state : void 0;
+  }
+  toAcquireStatus(state) {
+    switch (state) {
+      case LeaseState.Completed:
+        return "completed";
+      case LeaseState.Failed:
+        return "failed";
+      default:
+        return "in_progress";
+    }
+  }
+  assertIdentifier(value, name) {
+    if (!value) {
+      throw new Error(`${name} must be a non-empty string.`);
+    }
   }
 };
 export {

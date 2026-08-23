@@ -2,9 +2,9 @@
  * QueueCraft — publisher
  *
  * Serializes a payload and enqueues it on SQS. Every message carries a
- * client-generated idempotency key in its attributes, so the worker can enforce
- * exactly-once processing via the IdempotencyStore using a key the *producer*
- * controls — independent of the SQS-assigned MessageId.
+ * client-generated idempotency key in its attributes, so the worker can
+ * suppress duplicate logical jobs using a key the producer controls,
+ * independent of the SQS-assigned MessageId.
  */
 import {
   SQSClient,
@@ -20,7 +20,7 @@ import { randomUUID } from "node:crypto";
  * poller must (a) request it on receive via `MessageAttributeNames` and
  * (b) use its value as the `acquireLock` key.
  */
-export const IDEMPOTENCY_ATTRIBUTE = "MessageId";
+export const IDEMPOTENCY_ATTRIBUTE = "QueueCraftIdempotencyKey";
 
 export interface QueueCraftPublisherOptions {
   /** A configured SQS client (region/credentials handled by the caller). */
@@ -35,6 +35,14 @@ export interface QueueCraftPublisherOptions {
 
 /** Optional per-message knobs. */
 export interface PublishOptions {
+  /**
+   * Stable application-level identifier for this logical job.
+   *
+   * Reuse the same value when retrying a publish, such as a webhook event ID.
+   * A UUID is generated only when the caller does not provide one.
+   */
+  readonly idempotencyKey?: string;
+
   /** Delay before the message becomes visible, in seconds (0–900). Standard queues only. */
   readonly delaySeconds?: number;
 
@@ -86,7 +94,10 @@ export class QueueCraftPublisher {
       );
     }
 
-    const messageId = randomUUID();
+    const messageId = options.idempotencyKey ?? randomUUID();
+    if (!messageId) {
+      throw new TypeError("idempotencyKey must be a non-empty string.");
+    }
 
     const attributes: Record<string, MessageAttributeValue> = {
       [this.idempotencyAttribute]: {

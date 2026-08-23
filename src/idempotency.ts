@@ -1,160 +1,271 @@
 /**
- * QueueCraft — idempotency / execution leases
+ * DynamoDB-backed execution leases.
  *
- * Uses a DynamoDB conditional write to guarantee that a given SQS message is
- * processed at most once, even when the same message is delivered more than
- * once (SQS standard queues are at-least-once).
- *
- * Lease lifecycle for a `messageId`:
- *   acquireLock -> PENDING        (in-flight; auto-expires via TTL if the worker dies)
- *     |-- success --> markComplete -> COMPLETED   (terminal; duplicates are skipped)
- *     |-- fatal   --> markFailed   -> FAILED       (terminal; sent to your DLQ logic)
- *     `-- transient/crash --> releaseLock          (record deleted; job may retry)
+ * DynamoDB TTL is only used for eventual cleanup. Correctness comes from the
+ * explicit `leaseUntil` timestamp and an owner token checked on every write.
  */
 import {
-  DynamoDBClient,
-  PutItemCommand,
-  UpdateItemCommand,
-  DeleteItemCommand,
   ConditionalCheckFailedException,
-  type AttributeValue,
+  DeleteItemCommand,
+  DynamoDBClient,
+  GetItemCommand,
+  UpdateItemCommand,
 } from "@aws-sdk/client-dynamodb";
 
-/** The three states an execution lease can hold. */
 export const LeaseState = {
-  Pending: "PENDING",
+  InProgress: "IN_PROGRESS",
   Completed: "COMPLETED",
   Failed: "FAILED",
 } as const;
 
 export type LeaseState = (typeof LeaseState)[keyof typeof LeaseState];
 
-export interface IdempotencyStoreOptions {
-  /** A configured DynamoDB client (region/credentials handled by the caller). */
-  readonly client: DynamoDBClient;
+export interface ExecutionLease {
+  readonly messageId: string;
+  readonly ownerId: string;
+}
 
-  /** Table whose partition key is `messageId` (String). */
+export type AcquireLockResult =
+  | { readonly status: "acquired"; readonly lease: ExecutionLease }
+  | { readonly status: "in_progress" }
+  | { readonly status: "completed" }
+  | { readonly status: "failed" };
+
+export interface IdempotencyStoreOptions {
+  readonly client: DynamoDBClient;
   readonly tableName: string;
 
-  /**
-   * Optional lifetime for PENDING leases, in seconds. If the table has TTL
-   * enabled on the `expiresAt` attribute, stale locks left behind by a crashed
-   * worker are reclaimed automatically after this window. Strongly recommended.
-   */
-  readonly leaseTtlSeconds?: number;
+  /** How long one worker owns a job before another worker may take it over. */
+  readonly leaseDurationSeconds?: number;
+
+  /** How long terminal records remain available for duplicate detection. */
+  readonly recordTtlSeconds?: number;
+
+  /** Test hook. Production callers should leave this unset. */
+  readonly now?: () => number;
 }
+
+const DEFAULT_LEASE_SECONDS = 60;
+const DEFAULT_RECORD_TTL_SECONDS = 14 * 24 * 60 * 60;
 
 export class IdempotencyStore {
   private readonly client: DynamoDBClient;
   private readonly tableName: string;
-  private readonly leaseTtlSeconds?: number;
+  private readonly leaseDurationSeconds: number;
+  private readonly recordTtlSeconds: number;
+  private readonly now: () => number;
 
   constructor(options: IdempotencyStoreOptions) {
     if (!options.tableName) {
       throw new Error("IdempotencyStore requires a non-empty tableName.");
     }
+
+    this.leaseDurationSeconds =
+      options.leaseDurationSeconds ?? DEFAULT_LEASE_SECONDS;
+    this.recordTtlSeconds =
+      options.recordTtlSeconds ?? DEFAULT_RECORD_TTL_SECONDS;
+
+    if (!Number.isInteger(this.leaseDurationSeconds) || this.leaseDurationSeconds < 1) {
+      throw new RangeError("leaseDurationSeconds must be a positive integer.");
+    }
+    if (!Number.isInteger(this.recordTtlSeconds) || this.recordTtlSeconds < 1) {
+      throw new RangeError("recordTtlSeconds must be a positive integer.");
+    }
+
     this.client = options.client;
     this.tableName = options.tableName;
-    this.leaseTtlSeconds = options.leaseTtlSeconds;
+    this.now = options.now ?? Date.now;
   }
 
-  /**
-   * Attempt to claim an exclusive lease for `messageId`.
-   *
-   * Backed by a conditional `PutItem` that only writes when no record exists,
-   * so concurrent workers racing on the same message are resolved atomically
-   * by DynamoDB — exactly one wins.
-   *
-   * @returns `true` if the lease was acquired, `false` if it already exists
-   *          (i.e. the message is in-flight, completed, or failed elsewhere).
-   */
-  async acquireLock(messageId: string): Promise<boolean> {
-    const now = Date.now();
-    const item: Record<string, AttributeValue> = {
-      messageId: { S: messageId },
-      state: { S: LeaseState.Pending },
-      createdAt: { N: String(now) },
-      updatedAt: { N: String(now) },
-    };
+  /** Claim a new job or take over an expired IN_PROGRESS lease. */
+  async acquireLock(messageId: string, ownerId: string): Promise<AcquireLockResult> {
+    this.assertIdentifier(messageId, "messageId");
+    this.assertIdentifier(ownerId, "ownerId");
 
-    if (this.leaseTtlSeconds !== undefined) {
-      item.expiresAt = {
-        N: String(Math.floor(now / 1000) + this.leaseTtlSeconds),
-      };
-    }
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const nowSeconds = Math.floor(this.now() / 1000);
+      const leaseUntil = nowSeconds + this.leaseDurationSeconds;
 
-    try {
-      await this.client.send(
-        new PutItemCommand({
-          TableName: this.tableName,
-          Item: item,
-          ConditionExpression: "attribute_not_exists(messageId)",
-        }),
-      );
-      return true;
-    } catch (err) {
-      if (err instanceof ConditionalCheckFailedException) {
-        return false;
+      try {
+        await this.client.send(
+          new UpdateItemCommand({
+            TableName: this.tableName,
+            Key: { messageId: { S: messageId } },
+            UpdateExpression:
+              "SET #state = :inProgress, #ownerId = :ownerId, " +
+              "#leaseUntil = :leaseUntil, #updatedAt = :now, " +
+              "#createdAt = if_not_exists(#createdAt, :now), " +
+              "#expiresAt = :expiresAt",
+            ConditionExpression:
+              "attribute_not_exists(messageId) OR " +
+              "(#state = :inProgress AND #leaseUntil <= :now)",
+            ExpressionAttributeNames: {
+              "#state": "state",
+              "#ownerId": "ownerId",
+              "#leaseUntil": "leaseUntil",
+              "#updatedAt": "updatedAt",
+              "#createdAt": "createdAt",
+              "#expiresAt": "expiresAt",
+            },
+            ExpressionAttributeValues: {
+              ":inProgress": { S: LeaseState.InProgress },
+              ":ownerId": { S: ownerId },
+              ":leaseUntil": { N: String(leaseUntil) },
+              ":now": { N: String(nowSeconds) },
+              ":expiresAt": {
+                N: String(nowSeconds + this.recordTtlSeconds),
+              },
+            },
+          }),
+        );
+
+        return {
+          status: "acquired",
+          lease: { messageId, ownerId },
+        };
+      } catch (error) {
+        if (!(error instanceof ConditionalCheckFailedException)) {
+          throw error;
+        }
+
+        const existingState = await this.readState(messageId);
+        if (existingState === undefined) {
+          continue;
+        }
+
+        return { status: this.toAcquireStatus(existingState) };
       }
-      throw err;
     }
+
+    return { status: "in_progress" };
   }
 
-  /**
-   * Mark a lease `COMPLETED` (terminal success). Also clears the TTL so the
-   * record persists as a tombstone and future duplicate deliveries of the same
-   * message are rejected by `acquireLock`.
-   *
-   * Guarded by `attribute_exists` so a lost/expired lease surfaces as an error
-   * rather than silently resurrecting the record.
-   */
-  async markComplete(messageId: string): Promise<void> {
-    await this.transition(messageId, LeaseState.Completed);
-  }
-
-  /**
-   * Mark a lease `FAILED` (terminal failure). Like `markComplete`, the record
-   * is kept as a tombstone; route these to your dead-letter handling.
-   */
-  async markFailed(messageId: string): Promise<void> {
-    await this.transition(messageId, LeaseState.Failed);
-  }
-
-  /**
-   * Delete the lease so the job becomes eligible for reprocessing. Use this on
-   * transient failures or during graceful shutdown. `DeleteItem` is idempotent,
-   * so calling it on a missing record is a safe no-op.
-   */
-  async releaseLock(messageId: string): Promise<void> {
-    await this.client.send(
-      new DeleteItemCommand({
-        TableName: this.tableName,
-        Key: { messageId: { S: messageId } },
-      }),
-    );
-  }
-
-  /** Shared transition to a terminal state; clears the pending-lease TTL. */
-  private async transition(
-    messageId: string,
-    state: LeaseState,
-  ): Promise<void> {
+  async renewLease(lease: ExecutionLease): Promise<void> {
+    const nowSeconds = Math.floor(this.now() / 1000);
     await this.client.send(
       new UpdateItemCommand({
         TableName: this.tableName,
-        Key: { messageId: { S: messageId } },
+        Key: { messageId: { S: lease.messageId } },
         UpdateExpression:
-          "SET #state = :state, #updatedAt = :updatedAt REMOVE expiresAt",
-        ConditionExpression: "attribute_exists(messageId)",
+          "SET #leaseUntil = :leaseUntil, #updatedAt = :now, #expiresAt = :expiresAt",
+        ConditionExpression:
+          "#state = :inProgress AND #ownerId = :ownerId",
         ExpressionAttributeNames: {
           "#state": "state",
+          "#ownerId": "ownerId",
+          "#leaseUntil": "leaseUntil",
           "#updatedAt": "updatedAt",
+          "#expiresAt": "expiresAt",
         },
         ExpressionAttributeValues: {
-          ":state": { S: state },
-          ":updatedAt": { N: String(Date.now()) },
+          ":inProgress": { S: LeaseState.InProgress },
+          ":ownerId": { S: lease.ownerId },
+          ":leaseUntil": {
+            N: String(nowSeconds + this.leaseDurationSeconds),
+          },
+          ":now": { N: String(nowSeconds) },
+          ":expiresAt": {
+            N: String(nowSeconds + this.recordTtlSeconds),
+          },
         },
       }),
     );
+  }
+
+  async markComplete(lease: ExecutionLease): Promise<void> {
+    await this.transition(lease, LeaseState.Completed);
+  }
+
+  async markFailed(lease: ExecutionLease): Promise<void> {
+    await this.transition(lease, LeaseState.Failed);
+  }
+
+  async releaseLock(lease: ExecutionLease): Promise<void> {
+    await this.client.send(
+      new DeleteItemCommand({
+        TableName: this.tableName,
+        Key: { messageId: { S: lease.messageId } },
+        ConditionExpression:
+          "#state = :inProgress AND #ownerId = :ownerId",
+        ExpressionAttributeNames: {
+          "#state": "state",
+          "#ownerId": "ownerId",
+        },
+        ExpressionAttributeValues: {
+          ":inProgress": { S: LeaseState.InProgress },
+          ":ownerId": { S: lease.ownerId },
+        },
+      }),
+    );
+  }
+
+  private async transition(
+    lease: ExecutionLease,
+    state: typeof LeaseState.Completed | typeof LeaseState.Failed,
+  ): Promise<void> {
+    const nowSeconds = Math.floor(this.now() / 1000);
+    await this.client.send(
+      new UpdateItemCommand({
+        TableName: this.tableName,
+        Key: { messageId: { S: lease.messageId } },
+        UpdateExpression:
+          "SET #state = :state, #updatedAt = :now, #expiresAt = :expiresAt " +
+          "REMOVE #ownerId, #leaseUntil",
+        ConditionExpression:
+          "#state = :inProgress AND #ownerId = :ownerId",
+        ExpressionAttributeNames: {
+          "#state": "state",
+          "#ownerId": "ownerId",
+          "#leaseUntil": "leaseUntil",
+          "#updatedAt": "updatedAt",
+          "#expiresAt": "expiresAt",
+        },
+        ExpressionAttributeValues: {
+          ":state": { S: state },
+          ":inProgress": { S: LeaseState.InProgress },
+          ":ownerId": { S: lease.ownerId },
+          ":now": { N: String(nowSeconds) },
+          ":expiresAt": {
+            N: String(nowSeconds + this.recordTtlSeconds),
+          },
+        },
+      }),
+    );
+  }
+
+  private async readState(messageId: string): Promise<LeaseState | undefined> {
+    const result = await this.client.send(
+      new GetItemCommand({
+        TableName: this.tableName,
+        Key: { messageId: { S: messageId } },
+        ConsistentRead: true,
+        ProjectionExpression: "#state",
+        ExpressionAttributeNames: { "#state": "state" },
+      }),
+    );
+
+    const state = result.Item?.state?.S;
+    return Object.values(LeaseState).includes(state as LeaseState)
+      ? (state as LeaseState)
+      : undefined;
+  }
+
+  private toAcquireStatus(
+    state: LeaseState,
+  ): Exclude<AcquireLockResult["status"], "acquired"> {
+    switch (state) {
+      case LeaseState.Completed:
+        return "completed";
+      case LeaseState.Failed:
+        return "failed";
+      default:
+        return "in_progress";
+    }
+  }
+
+  private assertIdentifier(value: string, name: string): void {
+    if (!value) {
+      throw new Error(`${name} must be a non-empty string.`);
+    }
   }
 }

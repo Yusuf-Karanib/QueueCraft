@@ -27,6 +27,7 @@ export type {
 export { QueueCraftPoller } from "./poller";
 
 export type {
+  JobContext,
   QueueCraftPollerOptions,
   JobHandler,
 } from "./poller";
@@ -41,6 +42,8 @@ export {
 } from "./idempotency";
 
 export type {
+  AcquireLockResult,
+  ExecutionLease,
   IdempotencyStoreOptions,
 } from "./idempotency";
 

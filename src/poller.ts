@@ -2,7 +2,7 @@
  * QueueCraft — core polling engine
  *
  * Ties the pieces together: long-polls SQS for work, gates concurrency with the
- * Semaphore, enforces exactly-once execution with the IdempotencyStore, and
+ * Semaphore, suppresses duplicate logical jobs with the IdempotencyStore, and
  * commits or retries each message based on the handler's outcome.
  *
  *   receive -> acquireLock -> handler
@@ -10,14 +10,17 @@
  *                              `-- err  --> releaseLock (SQS redelivers)
  */
 import {
+  ChangeMessageVisibilityCommand,
   SQSClient,
   ReceiveMessageCommand,
   DeleteMessageCommand,
   type Message,
 } from "@aws-sdk/client-sqs";
+import { randomUUID } from "node:crypto";
 import type { WorkerOptions } from "./types";
 import type { Semaphore } from "./semaphore";
-import type { IdempotencyStore } from "./idempotency";
+import type { ExecutionLease, IdempotencyStore } from "./idempotency";
+import { IDEMPOTENCY_ATTRIBUTE } from "./publisher";
 
 /** SQS hard limit on messages returned per `ReceiveMessage` call. */
 const MAX_SQS_BATCH = 10;
@@ -27,7 +30,21 @@ const MAX_SQS_BATCH = 10;
  * body parsing/validation. Throwing (or rejecting) signals failure, which
  * triggers a lease release and SQS redelivery.
  */
-export type JobHandler = (message: Message) => Promise<void> | void;
+export interface JobContext {
+  /** Stable logical-job key selected by the producer. */
+  readonly idempotencyKey: string;
+
+  /** SQS receive count for this transport message. */
+  readonly attempt: number;
+
+  /** Aborted when QueueCraft can no longer prove it owns the job lease. */
+  readonly signal: AbortSignal;
+}
+
+export type JobHandler = (
+  message: Message,
+  context: JobContext,
+) => Promise<void> | void;
 
 export interface QueueCraftPollerOptions {
   readonly sqsClient: SQSClient;
@@ -49,6 +66,9 @@ export interface QueueCraftPollerOptions {
 
   /** Optional observer for handler/commit/receive errors. Never throws. */
   readonly onError?: (error: unknown, message?: Message) => void;
+
+  /** Message attribute containing the stable application idempotency key. */
+  readonly idempotencyAttribute?: string;
 }
 
 export class QueueCraftPoller {
@@ -58,15 +78,19 @@ export class QueueCraftPoller {
   private readonly queueUrl: string;
   private readonly handler: JobHandler;
   private readonly onError?: (error: unknown, message?: Message) => void;
+  private readonly idempotencyAttribute: string;
 
   private readonly maxConcurrency: number;
   private readonly pollIntervalMs: number;
   private readonly waitTimeSeconds: number;
   private readonly batchSize: number;
+  private readonly visibilityTimeoutSeconds: number;
+  private readonly heartbeatIntervalMs: number;
 
   private running = false;
   private readonly inflight = new Set<Promise<void>>();
   private abortController?: AbortController;
+  private activeReceive?: Promise<Message[]>;
 
   constructor(options: QueueCraftPollerOptions) {
     this.sqs = options.sqsClient;
@@ -75,11 +99,20 @@ export class QueueCraftPoller {
     this.queueUrl = options.queueUrl;
     this.handler = options.handler;
     this.onError = options.onError;
+    this.idempotencyAttribute =
+      options.idempotencyAttribute ?? IDEMPOTENCY_ATTRIBUTE;
 
     this.maxConcurrency = options.worker.concurrency;
     this.pollIntervalMs = options.worker.pollIntervalMs;
     this.waitTimeSeconds = options.worker.waitTimeSeconds ?? 20;
     this.batchSize = options.worker.batchSize ?? MAX_SQS_BATCH;
+    this.visibilityTimeoutSeconds =
+      options.worker.visibilityTimeoutSeconds ?? 60;
+    this.heartbeatIntervalMs =
+      options.worker.heartbeatIntervalMs ??
+      Math.floor((this.visibilityTimeoutSeconds * 1000) / 2);
+
+    this.validateOptions(options.worker.concurrency);
   }
 
   /** Whether the poll loop is currently active. */
@@ -109,9 +142,14 @@ export class QueueCraftPoller {
         messages = await this.receive(capacity);
       } catch (err) {
         if (!this.running) break; // long-poll aborted by stop()
-        this.onError?.(err);
+        this.reportError(err);
         await this.sleep(this.pollIntervalMs);
         continue;
+      }
+
+      if (!this.running) {
+        await this.returnUnstartedMessages(messages);
+        break;
       }
 
       // Dispatch without awaiting so the loop keeps the pipeline full up to the
@@ -128,6 +166,7 @@ export class QueueCraftPoller {
   async stop(): Promise<void> {
     this.running = false;
     this.abortController?.abort();
+    await this.activeReceive?.catch(() => undefined);
     await this.drain();
   }
 
@@ -140,21 +179,36 @@ export class QueueCraftPoller {
 
   private async receive(max: number): Promise<Message[]> {
     this.abortController = new AbortController();
-    const result = await this.sqs.send(
-      new ReceiveMessageCommand({
-        QueueUrl: this.queueUrl,
-        MaxNumberOfMessages: max,
-        WaitTimeSeconds: this.waitTimeSeconds,
-      }),
-      { abortSignal: this.abortController.signal },
-    );
-    return result.Messages ?? [];
+    const request = this.sqs
+      .send(
+        new ReceiveMessageCommand({
+          QueueUrl: this.queueUrl,
+          MaxNumberOfMessages: max,
+          WaitTimeSeconds: this.waitTimeSeconds,
+          VisibilityTimeout: this.visibilityTimeoutSeconds,
+          MessageAttributeNames: [this.idempotencyAttribute],
+          MessageSystemAttributeNames: ["ApproximateReceiveCount"],
+        }),
+        { abortSignal: this.abortController.signal },
+      )
+      .then((result) => result.Messages ?? []);
+
+    this.activeReceive = request;
+    try {
+      return await request;
+    } finally {
+      if (this.activeReceive === request) {
+        this.activeReceive = undefined;
+      }
+    }
   }
 
   private dispatch(message: Message): void {
-    const task = this.runWithSlot(message);
+    const task = this.runWithSlot(message).catch((error) => {
+      this.reportError(error, message);
+    });
     this.inflight.add(task);
-    void task.finally(() => this.inflight.delete(task));
+    void task.then(() => this.inflight.delete(task));
   }
 
   /** Hold a concurrency slot for the full lifetime of one message. */
@@ -173,41 +227,91 @@ export class QueueCraftPoller {
 
     // Nothing safe to act on — let visibility lapse so SQS redelivers/DLQs it.
     if (!messageId || !receiptHandle) {
-      this.onError?.(
+      this.reportError(
         new Error("SQS message missing MessageId or ReceiptHandle"),
         message,
       );
       return;
     }
 
-    // (4) Idempotency gate: exactly one worker wins the lease for this id.
-    const acquired = await this.idempotency.acquireLock(messageId);
-    if (!acquired) {
-      // In-flight/completed/failed elsewhere. The lease owner drives its
-      // lifecycle; leave this copy for SQS to reconcile.
-      return;
-    }
+    const idempotencyKey =
+      message.MessageAttributes?.[this.idempotencyAttribute]?.StringValue ??
+      messageId;
+    const ownerId = randomUUID();
 
-    try {
-      // (5) Execute the provided handler under the lease.
-      await this.handler(message);
-    } catch (err) {
-      // (7) Failure: drop the lease and don't delete, so the message becomes
-      //     visible again and SQS retries (subject to the queue's redrive policy).
-      await this.safeRelease(messageId);
-      this.onError?.(err, message);
-      return;
-    }
+    // One worker owns an active lease. Expired leases can be taken over.
+    const acquisition = await this.idempotency.acquireLock(
+      idempotencyKey,
+      ownerId,
+    );
 
-    // (6) Success: commit. Delete from SQS *before* markComplete so a crash in
-    //     this window can't leave a permanent COMPLETED tombstone blocking the
-    //     message — the PENDING lease simply expires via its TTL instead.
-    try {
+    if (acquisition.status === "completed") {
+      // The logical job already committed. Acknowledge this transport-level
+      // duplicate so it does not circulate until the DLQ.
       await this.deleteMessage(receiptHandle);
-      await this.idempotency.markComplete(messageId);
+      return;
+    }
+
+    if (acquisition.status !== "acquired") {
+      // Another worker still owns it, or it is terminally failed. Do not delete
+      // the message; queue redrive policy remains responsible for failures.
+      return;
+    }
+
+    const lease = acquisition.lease;
+    const handlerController = new AbortController();
+    const heartbeatController = new AbortController();
+    let heartbeatError: unknown;
+
+    const heartbeat = this.runHeartbeat(
+      lease,
+      receiptHandle,
+      heartbeatController.signal,
+    ).catch((error) => {
+      heartbeatError = error;
+      handlerController.abort(error);
+      this.reportError(error, message);
+    });
+
+    const attempt = this.receiveCount(message);
+    let handlerError: unknown;
+
+    try {
+      await this.handler(message, {
+        idempotencyKey,
+        attempt,
+        signal: handlerController.signal,
+      });
+    } catch (error) {
+      handlerError = error;
+    } finally {
+      heartbeatController.abort();
+      await heartbeat;
+    }
+
+    if (heartbeatError !== undefined) {
+      // Ownership is uncertain. Never settle with a possibly stale receipt
+      // handle or release a lease that another worker may now own.
+      return;
+    }
+
+    if (handlerError !== undefined) {
+      // Drop the owned lease and leave the message for SQS retry/redrive.
+      await this.safeRelease(lease);
+      this.reportError(handlerError, message);
+      return;
+    }
+
+    // Commit the durable completion record before acknowledging SQS. If the
+    // delete fails or the worker crashes, redelivery sees COMPLETED and safely
+    // acknowledges the duplicate without running the handler again.
+    try {
+      await this.idempotency.markComplete(lease);
+      await this.deleteMessage(receiptHandle);
     } catch (err) {
-      // Job already ran; the lease will TTL out. Surface for observability.
-      this.onError?.(err, message);
+      // Do not release the lease: the handler already returned successfully.
+      // A retry can observe COMPLETED or take over only after an expired lease.
+      this.reportError(err, message);
     }
   }
 
@@ -220,11 +324,123 @@ export class QueueCraftPoller {
     );
   }
 
-  private async safeRelease(messageId: string): Promise<void> {
+  private async changeVisibility(
+    receiptHandle: string,
+    visibilityTimeout = this.visibilityTimeoutSeconds,
+  ): Promise<void> {
+    await this.sqs.send(
+      new ChangeMessageVisibilityCommand({
+        QueueUrl: this.queueUrl,
+        ReceiptHandle: receiptHandle,
+        VisibilityTimeout: visibilityTimeout,
+      }),
+    );
+  }
+
+  private async runHeartbeat(
+    lease: ExecutionLease,
+    receiptHandle: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    while (await this.waitForHeartbeat(signal)) {
+      await this.idempotency.renewLease(lease);
+      await this.changeVisibility(receiptHandle);
+    }
+  }
+
+  private waitForHeartbeat(signal: AbortSignal): Promise<boolean> {
+    if (signal.aborted) return Promise.resolve(false);
+
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(true);
+      }, this.heartbeatIntervalMs);
+
+      const onAbort = () => {
+        clearTimeout(timeout);
+        resolve(false);
+      };
+
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  private receiveCount(message: Message): number {
+    const parsed = Number(message.Attributes?.ApproximateReceiveCount ?? "1");
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : 1;
+  }
+
+  private async returnUnstartedMessages(messages: Message[]): Promise<void> {
+    const returns = messages.flatMap((message) =>
+      message.ReceiptHandle
+        ? [this.changeVisibility(message.ReceiptHandle, 0)]
+        : [],
+    );
+    const results = await Promise.allSettled(returns);
+    for (const result of results) {
+      if (result.status === "rejected") {
+        this.reportError(result.reason);
+      }
+    }
+  }
+
+  private async safeRelease(lease: ExecutionLease): Promise<void> {
     try {
-      await this.idempotency.releaseLock(messageId);
+      await this.idempotency.releaseLock(lease);
     } catch (err) {
-      this.onError?.(err);
+      this.reportError(err);
+    }
+  }
+
+  private validateOptions(concurrency: number): void {
+    this.assertIntegerInRange(concurrency, "concurrency", 1, Number.MAX_SAFE_INTEGER);
+    if (concurrency !== this.semaphore.capacity) {
+      throw new RangeError(
+        "worker.concurrency must match the injected Semaphore capacity.",
+      );
+    }
+
+    this.assertIntegerInRange(
+      this.pollIntervalMs,
+      "pollIntervalMs",
+      0,
+      Number.MAX_SAFE_INTEGER,
+    );
+    this.assertIntegerInRange(this.waitTimeSeconds, "waitTimeSeconds", 0, 20);
+    this.assertIntegerInRange(this.batchSize, "batchSize", 1, MAX_SQS_BATCH);
+    this.assertIntegerInRange(
+      this.visibilityTimeoutSeconds,
+      "visibilityTimeoutSeconds",
+      1,
+      43_200,
+    );
+    this.assertIntegerInRange(
+      this.heartbeatIntervalMs,
+      "heartbeatIntervalMs",
+      1,
+      this.visibilityTimeoutSeconds * 1000 - 1,
+    );
+  }
+
+  private assertIntegerInRange(
+    value: number,
+    name: string,
+    minimum: number,
+    maximum: number,
+  ): void {
+    if (!Number.isInteger(value) || value < minimum || value > maximum) {
+      throw new RangeError(
+        `${name} must be an integer between ${minimum} and ${maximum}.`,
+      );
+    }
+  }
+
+  private reportError(error: unknown, message?: Message): void {
+    try {
+      this.onError?.(error, message);
+    } catch {
+      // Observability callbacks must never crash the worker runtime.
     }
   }
 

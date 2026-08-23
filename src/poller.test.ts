@@ -1,13 +1,4 @@
-/**
- * QueueCraftPoller unit tests.
- *
- * Both AWS SDK modules are mocked so nothing touches the network. The mocked
- * command classes tag each instance with a `__type` discriminant, letting the
- * fake `send()` implementations route by command and letting assertions filter
- * calls by the operation they represent (PutItem = acquireLock, UpdateItem =
- * markComplete, DeleteItem = releaseLock, DeleteMessage = SQS delete).
- */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@aws-sdk/client-sqs", () => {
   class SQSClient {
@@ -21,19 +12,33 @@ vi.mock("@aws-sdk/client-sqs", () => {
     readonly __type = "DeleteMessage";
     constructor(public readonly input: unknown) {}
   }
-  return { SQSClient, ReceiveMessageCommand, DeleteMessageCommand };
+  class ChangeMessageVisibilityCommand {
+    readonly __type = "ChangeMessageVisibility";
+    constructor(public readonly input: unknown) {}
+  }
+  class SendMessageCommand {
+    readonly __type = "SendMessage";
+    constructor(public readonly input: unknown) {}
+  }
+  return {
+    SQSClient,
+    ReceiveMessageCommand,
+    DeleteMessageCommand,
+    ChangeMessageVisibilityCommand,
+    SendMessageCommand,
+  };
 });
 
 vi.mock("@aws-sdk/client-dynamodb", () => {
   class DynamoDBClient {
     send = vi.fn();
   }
-  class PutItemCommand {
-    readonly __type = "PutItem";
-    constructor(public readonly input: unknown) {}
-  }
   class UpdateItemCommand {
     readonly __type = "UpdateItem";
+    constructor(public readonly input: unknown) {}
+  }
+  class GetItemCommand {
+    readonly __type = "GetItem";
     constructor(public readonly input: unknown) {}
   }
   class DeleteItemCommand {
@@ -41,64 +46,69 @@ vi.mock("@aws-sdk/client-dynamodb", () => {
     constructor(public readonly input: unknown) {}
   }
   class ConditionalCheckFailedException extends Error {
-    constructor(opts?: string | { message?: string }) {
-      super(
-        typeof opts === "string"
-          ? opts
-          : opts?.message ?? "conditional check failed",
-      );
+    constructor() {
+      super("conditional check failed");
       this.name = "ConditionalCheckFailedException";
     }
   }
   return {
     DynamoDBClient,
-    PutItemCommand,
     UpdateItemCommand,
+    GetItemCommand,
     DeleteItemCommand,
     ConditionalCheckFailedException,
   };
 });
 
+import { DynamoDBClient, ConditionalCheckFailedException } from "@aws-sdk/client-dynamodb";
 import { SQSClient, type Message } from "@aws-sdk/client-sqs";
-import {
-  DynamoDBClient,
-  ConditionalCheckFailedException,
-} from "@aws-sdk/client-dynamodb";
+import { IdempotencyStore, LeaseState } from "./idempotency";
 import { QueueCraftPoller, type JobHandler } from "./poller";
+import { IDEMPOTENCY_ATTRIBUTE } from "./publisher";
 import { Semaphore } from "./semaphore";
-import { IdempotencyStore } from "./idempotency";
 import type { WorkerOptions } from "./types";
 
 const QUEUE_URL =
   "https://sqs.me-central-1.amazonaws.com/123456789012/queuecraft-test";
+const STABLE_JOB_ID = "whatsapp-message-123";
 
-/** Resolve `value` on a macrotask so the poll loop yields between iterations. */
 const delay = <T>(ms: number, value: T): Promise<T> =>
   new Promise((resolve) => setTimeout(() => resolve(value), ms));
 
-type Fn = ReturnType<typeof vi.fn>;
+type MockFunction = ReturnType<typeof vi.fn>;
 
-/** Filter a mocked `send` fn's calls down to a single command type. */
-const commandsOfType = (send: Fn, type: string) =>
-  send.mock.calls.filter(([command]) => (command as { __type?: string }).__type === type);
+const commandsOfType = (send: MockFunction, type: string) =>
+  send.mock.calls.filter(
+    (call) => (call[0] as { __type?: string } | undefined)?.__type === type,
+  );
 
 interface Harness {
   poller: QueueCraftPoller;
-  handler: Fn;
-  onError: Fn;
-  sqsSend: Fn;
-  dynamoSend: Fn;
+  handler: MockFunction;
+  onError: MockFunction;
+  sqsSend: MockFunction;
+  dynamoSend: MockFunction;
   message: Message;
 }
 
-function createHarness(handlerImpl: JobHandler): Harness {
+function createHarness(
+  handlerImpl: JobHandler,
+  existingState?: (typeof LeaseState)[keyof typeof LeaseState],
+  workerOverrides: Partial<WorkerOptions> = {},
+): Harness {
   const message: Message = {
-    MessageId: "msg-1",
+    MessageId: "sqs-message-1",
     ReceiptHandle: "receipt-1",
     Body: JSON.stringify({ hello: "world" }),
+    MessageAttributes: {
+      [IDEMPOTENCY_ATTRIBUTE]: {
+        DataType: "String",
+        StringValue: STABLE_JOB_ID,
+      },
+    },
+    Attributes: { ApproximateReceiveCount: "2" },
   };
 
-  // SQS: hand back the message on the first receive, then long-poll "empty".
   const sqsSend = vi.fn();
   let receiveCount = 0;
   sqsSend.mockImplementation((command: { __type: string }) => {
@@ -108,35 +118,49 @@ function createHarness(handlerImpl: JobHandler): Harness {
         ? delay(0, { Messages: [message] })
         : delay(5, { Messages: [] });
     }
-    return Promise.resolve({}); // DeleteMessage, etc.
+    return Promise.resolve({});
   });
 
-  // DynamoDB: succeed by default; individual tests override acquireLock.
-  const dynamoSend = vi.fn().mockResolvedValue({});
+  const dynamoSend = vi.fn();
+  let firstUpdate = true;
+  dynamoSend.mockImplementation((command: { __type: string }) => {
+    if (command.__type === "UpdateItem" && firstUpdate) {
+      firstUpdate = false;
+      if (existingState !== undefined) {
+        return Promise.reject(
+          new ConditionalCheckFailedException({
+            $metadata: {},
+            message: "conditional check failed",
+          }),
+        );
+      }
+    }
+    if (command.__type === "GetItem") {
+      return Promise.resolve({ Item: { state: { S: existingState } } });
+    }
+    return Promise.resolve({});
+  });
 
   const sqsClient = { send: sqsSend } as unknown as SQSClient;
   const dynamoClient = { send: dynamoSend } as unknown as DynamoDBClient;
-
-  const semaphore = new Semaphore(5);
-  const idempotency = new IdempotencyStore({
-    client: dynamoClient,
-    tableName: "queuecraft-leases",
-  });
-
   const handler = vi.fn(handlerImpl);
   const onError = vi.fn();
-
   const worker: WorkerOptions = {
     concurrency: 5,
     pollIntervalMs: 5,
     waitTimeSeconds: 0,
     batchSize: 10,
+    ...workerOverrides,
   };
 
   const poller = new QueueCraftPoller({
     sqsClient,
-    semaphore,
-    idempotency,
+    semaphore: new Semaphore(5),
+    idempotency: new IdempotencyStore({
+      client: dynamoClient,
+      tableName: "queuecraft-leases",
+      now: () => 1_700_000_000_000,
+    }),
     queueUrl: QUEUE_URL,
     handler,
     worker,
@@ -146,14 +170,9 @@ function createHarness(handlerImpl: JobHandler): Harness {
   return { poller, handler, onError, sqsSend, dynamoSend, message };
 }
 
-/**
- * Drive the loop through exactly one message. `start()` reaches its first
- * (pending) receive synchronously; `stop()` ends the loop, and `start()`'s
- * final drain awaits the dispatched job, so the returned promise settles only
- * once that message is fully processed.
- */
 async function runOnce(poller: QueueCraftPoller): Promise<void> {
   const started = poller.start();
+  await delay(1, undefined);
   await poller.stop();
   await started;
 }
@@ -163,63 +182,62 @@ describe("QueueCraftPoller", () => {
     vi.clearAllMocks();
   });
 
-  it("processes a message end to end: acquire, handle, delete, mark complete", async () => {
+  it("uses the producer's stable idempotency key and completes the job", async () => {
     const { poller, handler, sqsSend, dynamoSend, message } = createHarness(
-      async () => {
-        /* success */
-      },
+      async () => undefined,
     );
 
     await runOnce(poller);
 
-    expect(handler).toHaveBeenCalledTimes(1);
-    expect(handler).toHaveBeenCalledWith(message);
+    expect(handler).toHaveBeenCalledWith(
+      message,
+      expect.objectContaining({
+        idempotencyKey: STABLE_JOB_ID,
+        attempt: 2,
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    expect(commandsOfType(sqsSend, "DeleteMessage")).toHaveLength(1);
+    expect(commandsOfType(dynamoSend, "UpdateItem")).toHaveLength(2);
 
-    // acquireLock => conditional PutItem
-    expect(commandsOfType(dynamoSend, "PutItem")).toHaveLength(1);
-
-    // message removed from SQS with the correct receipt handle
-    const deletes = commandsOfType(sqsSend, "DeleteMessage");
-    expect(deletes).toHaveLength(1);
-    expect((deletes[0][0] as { input: unknown }).input).toMatchObject({
-      QueueUrl: QUEUE_URL,
-      ReceiptHandle: "receipt-1",
+    const receiveInput = commandsOfType(sqsSend, "ReceiveMessage")[0][0].input;
+    expect(receiveInput).toMatchObject({
+      MessageAttributeNames: [IDEMPOTENCY_ATTRIBUTE],
+      MessageSystemAttributeNames: ["ApproximateReceiveCount"],
+      VisibilityTimeout: 60,
     });
 
-    // markComplete => UpdateItem
-    expect(commandsOfType(dynamoSend, "UpdateItem")).toHaveLength(1);
-
-    // nothing released on success
-    expect(commandsOfType(dynamoSend, "DeleteItem")).toHaveLength(0);
+    const acquireInput = commandsOfType(dynamoSend, "UpdateItem")[0][0].input;
+    expect(acquireInput).toMatchObject({
+      Key: { messageId: { S: STABLE_JOB_ID } },
+    });
   });
 
-  it("skips a duplicate message when the lock cannot be acquired", async () => {
-    const { poller, handler, sqsSend, dynamoSend } = createHarness(async () => {
-      /* should never run */
-    });
-
-    // The conditional PutItem fails => acquireLock resolves false.
-    dynamoSend.mockImplementation((command: { __type: string }) => {
-      if (command.__type === "PutItem") {
-        return Promise.reject(
-          new ConditionalCheckFailedException({ message: "already exists" }),
-        );
-      }
-      return Promise.resolve({});
-    });
+  it("acknowledges a completed duplicate without running the handler", async () => {
+    const { poller, handler, sqsSend } = createHarness(
+      async () => undefined,
+      LeaseState.Completed,
+    );
 
     await runOnce(poller);
 
     expect(handler).not.toHaveBeenCalled();
-    expect(commandsOfType(dynamoSend, "PutItem")).toHaveLength(1);
-
-    // no work committed: no SQS delete, no markComplete, no releaseLock
-    expect(commandsOfType(sqsSend, "DeleteMessage")).toHaveLength(0);
-    expect(commandsOfType(dynamoSend, "UpdateItem")).toHaveLength(0);
-    expect(commandsOfType(dynamoSend, "DeleteItem")).toHaveLength(0);
+    expect(commandsOfType(sqsSend, "DeleteMessage")).toHaveLength(1);
   });
 
-  it("releases the lock and leaves the message when the handler throws", async () => {
+  it("leaves an in-progress duplicate for its current owner", async () => {
+    const { poller, handler, sqsSend } = createHarness(
+      async () => undefined,
+      LeaseState.InProgress,
+    );
+
+    await runOnce(poller);
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(commandsOfType(sqsSend, "DeleteMessage")).toHaveLength(0);
+  });
+
+  it("releases only its owned lease when the handler throws", async () => {
     const { poller, handler, onError, sqsSend, dynamoSend } = createHarness(
       async () => {
         throw new Error("job blew up");
@@ -229,15 +247,87 @@ describe("QueueCraftPoller", () => {
     await runOnce(poller);
 
     expect(handler).toHaveBeenCalledTimes(1);
-
-    // lock acquired (PutItem) then released (DeleteItem)
-    expect(commandsOfType(dynamoSend, "PutItem")).toHaveLength(1);
-    expect(commandsOfType(dynamoSend, "DeleteItem")).toHaveLength(1);
-
-    // message NOT deleted and NOT marked complete => SQS will redeliver
     expect(commandsOfType(sqsSend, "DeleteMessage")).toHaveLength(0);
-    expect(commandsOfType(dynamoSend, "UpdateItem")).toHaveLength(0);
 
+    const releases = commandsOfType(dynamoSend, "DeleteItem");
+    expect(releases).toHaveLength(1);
+    expect(releases[0][0].input).toMatchObject({
+      ConditionExpression: "#state = :inProgress AND #ownerId = :ownerId",
+    });
     expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  it("renews both leases while a long-running handler is active", async () => {
+    const { poller, handler, sqsSend, dynamoSend } = createHarness(
+      async (_message, context) => {
+        expect(context.attempt).toBe(2);
+        await delay(18, undefined);
+      },
+      undefined,
+      { visibilityTimeoutSeconds: 1, heartbeatIntervalMs: 5 },
+    );
+
+    await runOnce(poller);
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(
+      commandsOfType(sqsSend, "ChangeMessageVisibility").length,
+    ).toBeGreaterThanOrEqual(1);
+    expect(commandsOfType(dynamoSend, "UpdateItem").length).toBeGreaterThanOrEqual(3);
+    expect(commandsOfType(sqsSend, "DeleteMessage")).toHaveLength(1);
+  });
+
+  it("aborts the handler and refuses settlement after heartbeat loss", async () => {
+    const harness = createHarness(
+      async (_message, context) => {
+        await new Promise<void>((resolve) => {
+          context.signal.addEventListener("abort", () => resolve(), {
+            once: true,
+          });
+        });
+      },
+      undefined,
+      { visibilityTimeoutSeconds: 1, heartbeatIntervalMs: 5 },
+    );
+
+    let updateCount = 0;
+    harness.dynamoSend.mockImplementation((command: { __type: string }) => {
+      if (command.__type === "UpdateItem") {
+        updateCount += 1;
+        if (updateCount === 2) {
+          return Promise.reject(new Error("lease renewal failed"));
+        }
+      }
+      return Promise.resolve({});
+    });
+
+    await runOnce(harness.poller);
+
+    expect(harness.handler).toHaveBeenCalledTimes(1);
+    expect(commandsOfType(harness.sqsSend, "DeleteMessage")).toHaveLength(0);
+    expect(commandsOfType(harness.dynamoSend, "DeleteItem")).toHaveLength(0);
+    expect(harness.onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "lease renewal failed" }),
+      harness.message,
+    );
+  });
+
+  it("returns messages received during shutdown without executing them", async () => {
+    const harness = createHarness(async () => undefined);
+
+    const started = harness.poller.start();
+    await harness.poller.stop();
+    await started;
+
+    expect(harness.handler).not.toHaveBeenCalled();
+    const visibilityChanges = commandsOfType(
+      harness.sqsSend,
+      "ChangeMessageVisibility",
+    );
+    expect(visibilityChanges).toHaveLength(1);
+    expect(visibilityChanges[0][0].input).toMatchObject({
+      ReceiptHandle: "receipt-1",
+      VisibilityTimeout: 0,
+    });
   });
 });

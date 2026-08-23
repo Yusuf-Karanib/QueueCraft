@@ -1,0 +1,173 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: QueueCraft development infrastructure with safe AWS defaults.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: queuecraft
+    AllowedPattern: "[a-z][a-z0-9-]{1,30}"
+    Description: Lowercase name used to prefix AWS resources.
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - production
+
+  VisibilityTimeoutSeconds:
+    Type: Number
+    Default: 60
+    MinValue: 1
+    MaxValue: 43200
+    Description: Initial time a received job remains hidden from other workers.
+
+  MaxReceiveCount:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    MaxValue: 1000
+    Description: Failed receives allowed before SQS moves a job to the DLQ.
+
+  EnablePointInTimeRecovery:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Enables paid continuous backups for the DynamoDB lease table.
+
+Conditions:
+  PointInTimeRecoveryEnabled: !Equals
+    - !Ref EnablePointInTimeRecovery
+    - "true"
+
+Resources:
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ProjectName}-${Environment}-jobs-dlq"
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  JobQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ProjectName}-${Environment}-jobs"
+      MessageRetentionPeriod: 345600
+      ReceiveMessageWaitTimeSeconds: 20
+      VisibilityTimeout: !Ref VisibilityTimeoutSeconds
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DeadLetterQueue.Arn
+        maxReceiveCount: !Ref MaxReceiveCount
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  IdempotencyTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ProjectName}-${Environment}-leases"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: messageId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: messageId
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If
+          - PointInTimeRecoveryEnabled
+          - true
+          - false
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  ProducerPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${ProjectName}-${Environment}-producer"
+      Description: Minimum permissions required to publish QueueCraft jobs.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PublishJobs
+            Effect: Allow
+            Action:
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+              - sqs:SendMessage
+            Resource: !GetAtt JobQueue.Arn
+
+  ConsumerPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${ProjectName}-${Environment}-consumer"
+      Description: Minimum permissions required by a QueueCraft worker.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ConsumeJobs
+            Effect: Allow
+            Action:
+              - sqs:ChangeMessageVisibility
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+              - sqs:ReceiveMessage
+            Resource: !GetAtt JobQueue.Arn
+          - Sid: ManageExecutionLeases
+            Effect: Allow
+            Action:
+              - dynamodb:DeleteItem
+              - dynamodb:DescribeTable
+              - dynamodb:GetItem
+              - dynamodb:UpdateItem
+            Resource: !GetAtt IdempotencyTable.Arn
+
+Outputs:
+  AwsRegion:
+    Description: Region selected when this stack was created.
+    Value: !Ref AWS::Region
+
+  QueueUrl:
+    Description: Set this as SQS_QUEUE_URL in the publisher and worker.
+    Value: !Ref JobQueue
+
+  QueueArn:
+    Value: !GetAtt JobQueue.Arn
+
+  DeadLetterQueueUrl:
+    Value: !Ref DeadLetterQueue
+
+  DeadLetterQueueArn:
+    Value: !GetAtt DeadLetterQueue.Arn
+
+  IdempotencyTableName:
+    Description: Pass this table name to IdempotencyStore in the worker.
+    Value: !Ref IdempotencyTable
+
+  ProducerPolicyArn:
+    Description: Attach this policy only to the YallaQueue publisher identity.
+    Value: !Ref ProducerPolicy
+
+  ConsumerPolicyArn:
+    Description: Attach this policy only to the worker identity.
+    Value: !Ref ConsumerPolicy

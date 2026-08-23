@@ -5,9 +5,9 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
  * QueueCraft — publisher
  *
  * Serializes a payload and enqueues it on SQS. Every message carries a
- * client-generated idempotency key in its attributes, so the worker can enforce
- * exactly-once processing via the IdempotencyStore using a key the *producer*
- * controls — independent of the SQS-assigned MessageId.
+ * client-generated idempotency key in its attributes, so the worker can
+ * suppress duplicate logical jobs using a key the producer controls,
+ * independent of the SQS-assigned MessageId.
  */
 
 /**
@@ -17,7 +17,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
  * poller must (a) request it on receive via `MessageAttributeNames` and
  * (b) use its value as the `acquireLock` key.
  */
-declare const IDEMPOTENCY_ATTRIBUTE = "MessageId";
+declare const IDEMPOTENCY_ATTRIBUTE = "QueueCraftIdempotencyKey";
 interface QueueCraftPublisherOptions {
     /** A configured SQS client (region/credentials handled by the caller). */
     readonly sqsClient: SQSClient;
@@ -28,6 +28,13 @@ interface QueueCraftPublisherOptions {
 }
 /** Optional per-message knobs. */
 interface PublishOptions {
+    /**
+     * Stable application-level identifier for this logical job.
+     *
+     * Reuse the same value when retrying a publish, such as a webhook event ID.
+     * A UUID is generated only when the caller does not provide one.
+     */
+    readonly idempotencyKey?: string;
     /** Delay before the message becomes visible, in seconds (0–900). Standard queues only. */
     readonly delaySeconds?: number;
     /** FIFO only: partitions ordering. Required when publishing to a `.fifo` queue. */
@@ -112,8 +119,13 @@ interface WorkerOptions {
     readonly waitTimeSeconds?: number;
     /** Messages requested per poll. Valid range: 1–10. */
     readonly batchSize?: number;
-    /** Maximum attempts before a job is marked `failed`. */
-    readonly maxRetries?: number;
+    /** Per-receive SQS visibility timeout. Valid range: 1–43,200 seconds. */
+    readonly visibilityTimeoutSeconds?: number;
+    /**
+     * How often the worker renews SQS visibility and the DynamoDB lease.
+     * Must be shorter than the visibility timeout. Defaults to half of it.
+     */
+    readonly heartbeatIntervalMs?: number;
 }
 
 /**
@@ -137,6 +149,8 @@ declare class Semaphore {
     constructor(maxConcurrency: number);
     /** Number of tasks currently holding a permit. */
     get activeCount(): number;
+    /** Maximum number of permits this semaphore can issue. */
+    get capacity(): number;
     /** Number of callers queued and waiting for a permit. */
     get pendingCount(): number;
     /**
@@ -163,83 +177,66 @@ declare class Semaphore {
 }
 
 /**
- * QueueCraft — idempotency / execution leases
+ * DynamoDB-backed execution leases.
  *
- * Uses a DynamoDB conditional write to guarantee that a given SQS message is
- * processed at most once, even when the same message is delivered more than
- * once (SQS standard queues are at-least-once).
- *
- * Lease lifecycle for a `messageId`:
- *   acquireLock -> PENDING        (in-flight; auto-expires via TTL if the worker dies)
- *     |-- success --> markComplete -> COMPLETED   (terminal; duplicates are skipped)
- *     |-- fatal   --> markFailed   -> FAILED       (terminal; sent to your DLQ logic)
- *     `-- transient/crash --> releaseLock          (record deleted; job may retry)
+ * DynamoDB TTL is only used for eventual cleanup. Correctness comes from the
+ * explicit `leaseUntil` timestamp and an owner token checked on every write.
  */
 
-/** The three states an execution lease can hold. */
 declare const LeaseState: {
-    readonly Pending: "PENDING";
+    readonly InProgress: "IN_PROGRESS";
     readonly Completed: "COMPLETED";
     readonly Failed: "FAILED";
 };
 type LeaseState = (typeof LeaseState)[keyof typeof LeaseState];
+interface ExecutionLease {
+    readonly messageId: string;
+    readonly ownerId: string;
+}
+type AcquireLockResult = {
+    readonly status: "acquired";
+    readonly lease: ExecutionLease;
+} | {
+    readonly status: "in_progress";
+} | {
+    readonly status: "completed";
+} | {
+    readonly status: "failed";
+};
 interface IdempotencyStoreOptions {
-    /** A configured DynamoDB client (region/credentials handled by the caller). */
     readonly client: DynamoDBClient;
-    /** Table whose partition key is `messageId` (String). */
     readonly tableName: string;
-    /**
-     * Optional lifetime for PENDING leases, in seconds. If the table has TTL
-     * enabled on the `expiresAt` attribute, stale locks left behind by a crashed
-     * worker are reclaimed automatically after this window. Strongly recommended.
-     */
-    readonly leaseTtlSeconds?: number;
+    /** How long one worker owns a job before another worker may take it over. */
+    readonly leaseDurationSeconds?: number;
+    /** How long terminal records remain available for duplicate detection. */
+    readonly recordTtlSeconds?: number;
+    /** Test hook. Production callers should leave this unset. */
+    readonly now?: () => number;
 }
 declare class IdempotencyStore {
     private readonly client;
     private readonly tableName;
-    private readonly leaseTtlSeconds?;
+    private readonly leaseDurationSeconds;
+    private readonly recordTtlSeconds;
+    private readonly now;
     constructor(options: IdempotencyStoreOptions);
-    /**
-     * Attempt to claim an exclusive lease for `messageId`.
-     *
-     * Backed by a conditional `PutItem` that only writes when no record exists,
-     * so concurrent workers racing on the same message are resolved atomically
-     * by DynamoDB — exactly one wins.
-     *
-     * @returns `true` if the lease was acquired, `false` if it already exists
-     *          (i.e. the message is in-flight, completed, or failed elsewhere).
-     */
-    acquireLock(messageId: string): Promise<boolean>;
-    /**
-     * Mark a lease `COMPLETED` (terminal success). Also clears the TTL so the
-     * record persists as a tombstone and future duplicate deliveries of the same
-     * message are rejected by `acquireLock`.
-     *
-     * Guarded by `attribute_exists` so a lost/expired lease surfaces as an error
-     * rather than silently resurrecting the record.
-     */
-    markComplete(messageId: string): Promise<void>;
-    /**
-     * Mark a lease `FAILED` (terminal failure). Like `markComplete`, the record
-     * is kept as a tombstone; route these to your dead-letter handling.
-     */
-    markFailed(messageId: string): Promise<void>;
-    /**
-     * Delete the lease so the job becomes eligible for reprocessing. Use this on
-     * transient failures or during graceful shutdown. `DeleteItem` is idempotent,
-     * so calling it on a missing record is a safe no-op.
-     */
-    releaseLock(messageId: string): Promise<void>;
-    /** Shared transition to a terminal state; clears the pending-lease TTL. */
+    /** Claim a new job or take over an expired IN_PROGRESS lease. */
+    acquireLock(messageId: string, ownerId: string): Promise<AcquireLockResult>;
+    renewLease(lease: ExecutionLease): Promise<void>;
+    markComplete(lease: ExecutionLease): Promise<void>;
+    markFailed(lease: ExecutionLease): Promise<void>;
+    releaseLock(lease: ExecutionLease): Promise<void>;
     private transition;
+    private readState;
+    private toAcquireStatus;
+    private assertIdentifier;
 }
 
 /**
  * QueueCraft — core polling engine
  *
  * Ties the pieces together: long-polls SQS for work, gates concurrency with the
- * Semaphore, enforces exactly-once execution with the IdempotencyStore, and
+ * Semaphore, suppresses duplicate logical jobs with the IdempotencyStore, and
  * commits or retries each message based on the handler's outcome.
  *
  *   receive -> acquireLock -> handler
@@ -252,7 +249,15 @@ declare class IdempotencyStore {
  * body parsing/validation. Throwing (or rejecting) signals failure, which
  * triggers a lease release and SQS redelivery.
  */
-type JobHandler = (message: Message) => Promise<void> | void;
+interface JobContext {
+    /** Stable logical-job key selected by the producer. */
+    readonly idempotencyKey: string;
+    /** SQS receive count for this transport message. */
+    readonly attempt: number;
+    /** Aborted when QueueCraft can no longer prove it owns the job lease. */
+    readonly signal: AbortSignal;
+}
+type JobHandler = (message: Message, context: JobContext) => Promise<void> | void;
 interface QueueCraftPollerOptions {
     readonly sqsClient: SQSClient;
     readonly semaphore: Semaphore;
@@ -269,6 +274,8 @@ interface QueueCraftPollerOptions {
     readonly worker: WorkerOptions;
     /** Optional observer for handler/commit/receive errors. Never throws. */
     readonly onError?: (error: unknown, message?: Message) => void;
+    /** Message attribute containing the stable application idempotency key. */
+    readonly idempotencyAttribute?: string;
 }
 declare class QueueCraftPoller {
     private readonly sqs;
@@ -277,13 +284,17 @@ declare class QueueCraftPoller {
     private readonly queueUrl;
     private readonly handler;
     private readonly onError?;
+    private readonly idempotencyAttribute;
     private readonly maxConcurrency;
     private readonly pollIntervalMs;
     private readonly waitTimeSeconds;
     private readonly batchSize;
+    private readonly visibilityTimeoutSeconds;
+    private readonly heartbeatIntervalMs;
     private running;
     private readonly inflight;
     private abortController?;
+    private activeReceive?;
     constructor(options: QueueCraftPollerOptions);
     /** Whether the poll loop is currently active. */
     get isRunning(): boolean;
@@ -302,9 +313,17 @@ declare class QueueCraftPoller {
     private runWithSlot;
     private process;
     private deleteMessage;
+    private changeVisibility;
+    private runHeartbeat;
+    private waitForHeartbeat;
+    private receiveCount;
+    private returnUnstartedMessages;
     private safeRelease;
+    private validateOptions;
+    private assertIntegerInRange;
+    private reportError;
     private drain;
     private sleep;
 }
 
-export { type EpochMillis, IDEMPOTENCY_ATTRIBUTE, IdempotencyStore, type IdempotencyStoreOptions, type Job, type JobHandler, type JobStatus, LeaseState, type PublishOptions, type PublishResult, type QueueCraftConfig, QueueCraftPoller, type QueueCraftPollerOptions, QueueCraftPublisher, type QueueCraftPublisherOptions, Semaphore, type WorkerOptions };
+export { type AcquireLockResult, type EpochMillis, type ExecutionLease, IDEMPOTENCY_ATTRIBUTE, IdempotencyStore, type IdempotencyStoreOptions, type Job, type JobContext, type JobHandler, type JobStatus, LeaseState, type PublishOptions, type PublishResult, type QueueCraftConfig, QueueCraftPoller, type QueueCraftPollerOptions, QueueCraftPublisher, type QueueCraftPublisherOptions, Semaphore, type WorkerOptions };
