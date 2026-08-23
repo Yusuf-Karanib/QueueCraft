@@ -17,11 +17,12 @@ Implemented:
 - Handler cancellation signal when ownership is lost
 - Duplicate acknowledgement after a completed job
 - Unit tests for publishing, completion, retries, and duplicate handling
+- CloudFormation for SQS, a dead-letter queue, DynamoDB, least-privilege IAM,
+  and an optional email-backed dead-letter queue alarm
 
 Still required before production use:
 
 - Process-signal helpers and bounded graceful-shutdown timeouts
-- AWS infrastructure templates, least-privilege IAM, and a DLQ policy
 - Integration tests against LocalStack or real AWS resources
 - Structured logging, metrics, and tracing
 

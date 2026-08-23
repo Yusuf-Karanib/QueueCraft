@@ -38,10 +38,19 @@ Parameters:
       - "false"
     Description: Enables paid continuous backups for the DynamoDB lease table.
 
+  AlarmEmail:
+    Type: String
+    Default: ""
+    Description: Optional email address that receives dead-letter queue alarms. The recipient must confirm the SNS subscription.
+
 Conditions:
   PointInTimeRecoveryEnabled: !Equals
     - !Ref EnablePointInTimeRecovery
     - "true"
+  HasAlarmEmail: !Not
+    - !Equals
+      - !Ref AlarmEmail
+      - ""
 
 Resources:
   DeadLetterQueue:
@@ -72,6 +81,48 @@ Resources:
           Value: !Ref ProjectName
         - Key: Environment
           Value: !Ref Environment
+
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Condition: HasAlarmEmail
+    Properties:
+      TopicName: !Sub "${ProjectName}-${Environment}-alarms"
+      KmsMasterKeyId: alias/aws/sns
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  AlarmEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlarmEmail
+    Properties:
+      TopicArn: !Ref AlarmTopic
+      Protocol: email
+      Endpoint: !Ref AlarmEmail
+
+  DeadLetterQueueAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-${Environment}-dead-letter-messages"
+      AlarmDescription: A QueueCraft job failed repeatedly and reached the dead-letter queue.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt DeadLetterQueue.QueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmEmail
+        - - !Ref AlarmTopic
+        - !Ref AWS::NoValue
 
   IdempotencyTable:
     Type: AWS::DynamoDB::Table
@@ -159,6 +210,13 @@ Outputs:
 
   DeadLetterQueueArn:
     Value: !GetAtt DeadLetterQueue.Arn
+
+  DeadLetterAlarmName:
+    Value: !Ref DeadLetterQueueAlarm
+
+  AlarmTopicArn:
+    Condition: HasAlarmEmail
+    Value: !Ref AlarmTopic
 
   IdempotencyTableName:
     Description: Pass this table name to IdempotencyStore in the worker.
