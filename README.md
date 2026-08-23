@@ -19,6 +19,7 @@ Implemented:
 - Unit tests for publishing, completion, retries, and duplicate handling
 - CloudFormation for SQS, a dead-letter queue, DynamoDB, least-privilege IAM,
   and an optional email-backed dead-letter queue alarm
+- An event-driven AWS Lambda batch processor with partial-message retries
 
 Still required before production use:
 
@@ -76,3 +77,7 @@ planned end-to-end AWS test.
 The first CloudFormation template and beginner deployment instructions are in
 `infrastructure/`. The template creates a standard queue, DLQ, DynamoDB lease
 table, and separate least-privilege publisher and worker policies.
+
+For low-volume systems, `QueueCraftLambdaProcessor` lets an SQS event source
+wake Lambda only when jobs arrive. It keeps the same stable-key and DynamoDB
+duplicate protection without paying for an always-running poller.

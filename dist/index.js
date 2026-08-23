@@ -358,6 +358,9 @@ var QueueCraftPoller = class {
   }
 };
 
+// src/lambda-processor.ts
+import { randomUUID as randomUUID3 } from "crypto";
+
 // src/semaphore.ts
 var Semaphore = class {
   /** Maximum number of permits that may be held simultaneously. */
@@ -431,6 +434,114 @@ var Semaphore = class {
       return await task();
     } finally {
       this.release();
+    }
+  }
+};
+
+// src/lambda-processor.ts
+var QueueCraftLambdaProcessor = class {
+  idempotency;
+  handler;
+  semaphore;
+  idempotencyAttribute;
+  onError;
+  constructor(options) {
+    const concurrency = options.concurrency ?? 10;
+    this.idempotency = options.idempotency;
+    this.handler = options.handler;
+    this.semaphore = new Semaphore(concurrency);
+    this.idempotencyAttribute = options.idempotencyAttribute ?? IDEMPOTENCY_ATTRIBUTE;
+    this.onError = options.onError;
+  }
+  async process(event, options = {}) {
+    const signal = options.signal ?? new AbortController().signal;
+    const results = await Promise.all(
+      event.Records.map(
+        (record) => this.semaphore.run(() => this.processRecord(record, signal))
+      )
+    );
+    return {
+      batchItemFailures: event.Records.flatMap(
+        (record, index) => results[index] ? [] : [{ itemIdentifier: record.messageId }]
+      )
+    };
+  }
+  async processRecord(record, signal) {
+    if (!record.messageId || signal.aborted) {
+      return false;
+    }
+    const idempotencyKey = record.messageAttributes?.[this.idempotencyAttribute]?.stringValue ?? record.messageId;
+    let acquisition;
+    try {
+      acquisition = await this.idempotency.acquireLock(
+        idempotencyKey,
+        randomUUID3()
+      );
+    } catch (error) {
+      this.reportError(error, record);
+      return false;
+    }
+    if (acquisition.status === "completed") {
+      return true;
+    }
+    if (acquisition.status !== "acquired") {
+      return false;
+    }
+    const lease = acquisition.lease;
+    let handlerReturned = false;
+    try {
+      const message = this.toSdkMessage(record);
+      const context = {
+        idempotencyKey,
+        attempt: this.receiveCount(record),
+        signal
+      };
+      await this.handler(message, context);
+      handlerReturned = true;
+      if (signal.aborted) {
+        throw new Error("Lambda invocation is ending before job completion.");
+      }
+      await this.idempotency.markComplete(lease);
+      return true;
+    } catch (error) {
+      if (!handlerReturned) {
+        await this.safeRelease(lease, record);
+      }
+      this.reportError(error, record);
+      return false;
+    }
+  }
+  toSdkMessage(record) {
+    const idempotencyValue = record.messageAttributes?.[this.idempotencyAttribute];
+    return {
+      MessageId: record.messageId,
+      ReceiptHandle: record.receiptHandle,
+      Body: record.body,
+      Attributes: record.attributes ? { ...record.attributes } : void 0,
+      MessageAttributes: idempotencyValue ? {
+        [this.idempotencyAttribute]: {
+          DataType: idempotencyValue.dataType,
+          StringValue: idempotencyValue.stringValue,
+          BinaryValue: idempotencyValue.binaryValue ? Buffer.from(idempotencyValue.binaryValue, "base64") : void 0
+        }
+      } : void 0
+    };
+  }
+  receiveCount(record) {
+    const parsed = Number(record.attributes?.ApproximateReceiveCount ?? "1");
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : 1;
+  }
+  async safeRelease(lease, record) {
+    try {
+      await this.idempotency.releaseLock(lease);
+    } catch (error) {
+      this.reportError(error, record);
+    }
+  }
+  reportError(error, record) {
+    try {
+      this.onError?.(error, record);
+    } catch {
     }
   }
 };
@@ -633,6 +744,7 @@ export {
   IDEMPOTENCY_ATTRIBUTE,
   IdempotencyStore,
   LeaseState,
+  QueueCraftLambdaProcessor,
   QueueCraftPoller,
   QueueCraftPublisher,
   Semaphore

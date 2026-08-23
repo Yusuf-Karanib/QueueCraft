@@ -326,4 +326,55 @@ declare class QueueCraftPoller {
     private sleep;
 }
 
-export { type AcquireLockResult, type EpochMillis, type ExecutionLease, IDEMPOTENCY_ATTRIBUTE, IdempotencyStore, type IdempotencyStoreOptions, type Job, type JobContext, type JobHandler, type JobStatus, LeaseState, type PublishOptions, type PublishResult, type QueueCraftConfig, QueueCraftPoller, type QueueCraftPollerOptions, QueueCraftPublisher, type QueueCraftPublisherOptions, Semaphore, type WorkerOptions };
+interface LambdaSqsMessageAttribute {
+    readonly dataType: string;
+    readonly stringValue?: string;
+    readonly binaryValue?: string;
+}
+interface LambdaSqsRecord {
+    readonly messageId: string;
+    readonly receiptHandle?: string;
+    readonly body: string;
+    readonly attributes?: Readonly<Record<string, string>>;
+    readonly messageAttributes?: Readonly<Record<string, LambdaSqsMessageAttribute>>;
+}
+interface LambdaSqsEvent {
+    readonly Records: readonly LambdaSqsRecord[];
+}
+interface LambdaBatchItemFailure {
+    readonly itemIdentifier: string;
+}
+interface LambdaSqsBatchResponse {
+    readonly batchItemFailures: readonly LambdaBatchItemFailure[];
+}
+interface QueueCraftLambdaProcessorOptions {
+    readonly idempotency: IdempotencyStore;
+    readonly handler: JobHandler;
+    readonly concurrency?: number;
+    readonly idempotencyAttribute?: string;
+    readonly onError?: (error: unknown, record?: LambdaSqsRecord) => void;
+}
+interface LambdaProcessOptions {
+    readonly signal?: AbortSignal;
+}
+/**
+ * Processes SQS event-source batches inside AWS Lambda while preserving
+ * QueueCraft's DynamoDB duplicate protection. Lambda remains responsible for
+ * receiving, deleting, retrying, and redriving SQS messages.
+ */
+declare class QueueCraftLambdaProcessor {
+    private readonly idempotency;
+    private readonly handler;
+    private readonly semaphore;
+    private readonly idempotencyAttribute;
+    private readonly onError?;
+    constructor(options: QueueCraftLambdaProcessorOptions);
+    process(event: LambdaSqsEvent, options?: LambdaProcessOptions): Promise<LambdaSqsBatchResponse>;
+    private processRecord;
+    private toSdkMessage;
+    private receiveCount;
+    private safeRelease;
+    private reportError;
+}
+
+export { type AcquireLockResult, type EpochMillis, type ExecutionLease, IDEMPOTENCY_ATTRIBUTE, IdempotencyStore, type IdempotencyStoreOptions, type Job, type JobContext, type JobHandler, type JobStatus, type LambdaBatchItemFailure, type LambdaProcessOptions, type LambdaSqsBatchResponse, type LambdaSqsEvent, type LambdaSqsMessageAttribute, type LambdaSqsRecord, LeaseState, type PublishOptions, type PublishResult, type QueueCraftConfig, QueueCraftLambdaProcessor, type QueueCraftLambdaProcessorOptions, QueueCraftPoller, type QueueCraftPollerOptions, QueueCraftPublisher, type QueueCraftPublisherOptions, Semaphore, type WorkerOptions };

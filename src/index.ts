@@ -32,6 +32,19 @@ export type {
   JobHandler,
 } from "./poller";
 
+// AWS Lambda SQS event-source adapter
+export { QueueCraftLambdaProcessor } from "./lambda-processor";
+
+export type {
+  LambdaBatchItemFailure,
+  LambdaProcessOptions,
+  LambdaSqsBatchResponse,
+  LambdaSqsEvent,
+  LambdaSqsMessageAttribute,
+  LambdaSqsRecord,
+  QueueCraftLambdaProcessorOptions,
+} from "./lambda-processor";
+
 // Concurrency
 export { Semaphore } from "./semaphore";
 
