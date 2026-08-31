@@ -79,4 +79,10 @@ export interface WorkerOptions {
    * Must be shorter than the visibility timeout. Defaults to half of it.
    */
   readonly heartbeatIntervalMs?: number;
+
+  /**
+   * Time to let active handlers finish after stop() is called before their
+   * AbortSignals are cancelled. Defaults to 30 seconds.
+   */
+  readonly shutdownTimeoutMs?: number;
 }

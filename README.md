@@ -1,38 +1,60 @@
 # QueueCraft
 
-QueueCraft is an early TypeScript toolkit for publishing and processing AWS
-SQS jobs with DynamoDB-backed duplicate protection.
+QueueCraft is a TypeScript toolkit for moving slow or failure-prone work out of
+web requests and into AWS SQS. It supplies the queue plumbing so an application
+can publish a job, process it with bounded concurrency, retry failures, and
+avoid repeating completed work.
 
-## Project status
+QueueCraft is the reusable engine. [YallaQueue](https://github.com/Yusuf-Karanib/YallaQueue)
+is its first reference application: WhatsApp booking requests are accepted
+quickly, placed on SQS, and processed in the background.
 
-QueueCraft is an alpha prototype. It is not ready for production use yet.
+## Status
+
+QueueCraft is an alpha portfolio project. Its unit-tested core and AWS
+infrastructure are usable for controlled pilots, but it has not yet earned a
+production-ready claim.
 
 Implemented:
 
 - SQS publisher with caller-controlled idempotency keys
 - Long-polling worker with bounded concurrency
-- Owner-based DynamoDB execution leases
-- Safe takeover of expired leases
+- SQS-triggered Lambda batch processor with partial-message retries
+- DynamoDB execution leases and completed-job duplicate suppression
 - SQS visibility and DynamoDB lease heartbeats for long jobs
-- Handler cancellation signal when ownership is lost
-- Duplicate acknowledgement after a completed job
-- Unit tests for publishing, completion, retries, and duplicate handling
-- CloudFormation for SQS, a dead-letter queue, DynamoDB, least-privilege IAM,
-  and an optional email-backed dead-letter queue alarm
-- An event-driven AWS Lambda batch processor with partial-message retries
+- Bounded graceful shutdown with handler cancellation
+- CloudFormation for a standard queue, DLQ, DynamoDB table, IAM policies, and alarms
+- Automated checks for Node.js 20 and 22
 
-Still required before production use:
+Not implemented yet:
 
-- Process-signal helpers and bounded graceful-shutdown timeouts
-- Integration tests against LocalStack or real AWS resources
-- Structured logging, metrics, and tracing
+- Integration tests against temporary real AWS resources
+- Structured logs, custom metrics, and tracing
+- A local queue and DLQ dashboard
+- A published npm package
 
-## Important delivery rule
+The unscoped npm name `queuecraft` is already owned by another publisher. A
+scoped package name will be selected before the first npm release.
 
-SQS and webhook systems can deliver the same logical event more than once.
-QueueCraft reduces duplicate execution, but it does not promise universal
-"exactly once" side effects. Job handlers must still be designed so retrying
-them is safe.
+## Why SQS?
+
+A webhook should respond quickly. It should not keep the sender waiting while
+the application calls other services, writes several records, or sends a
+message. QueueCraft separates those two jobs:
+
+```text
+webhook or API -> QueueCraft publisher -> SQS -> QueueCraft worker -> business logic
+                                              |
+                                              +-> DLQ after repeated failures
+```
+
+SQS standard queues provide at-least-once delivery. That means the same logical
+job can arrive more than once. QueueCraft records execution state in DynamoDB
+to reduce duplicate execution, but it cannot promise universal exactly-once
+side effects. Handlers must still be safe to retry.
+
+SQS redrive policy—not QueueCraft application code—moves repeatedly failing
+messages to the DLQ.
 
 ## Publishing a job
 
@@ -40,11 +62,19 @@ Use a stable identifier from the source event. For a WhatsApp webhook, use the
 Meta message ID instead of generating a new value on every retry.
 
 ```ts
+import { SQSClient } from "@aws-sdk/client-sqs";
+import { QueueCraftPublisher } from "queuecraft";
+
+const publisher = new QueueCraftPublisher({
+  sqsClient: new SQSClient({ region: process.env.AWS_REGION }),
+  queueUrl: process.env.QUEUE_URL!,
+});
+
 await publisher.publish(
   {
     type: "booking_request",
     phoneNumber: "971500000000",
-    requestedTime: "2026-08-24T15:00:00+04:00",
+    requestedTime: "2026-09-01T15:00:00+04:00",
   },
   { idempotencyKey: whatsappMessageId },
 );
@@ -53,14 +83,57 @@ await publisher.publish(
 When no idempotency key is supplied, QueueCraft generates a UUID. That is only
 appropriate when the publish operation will never be retried as the same job.
 
+## Processing jobs
+
+```ts
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { SQSClient } from "@aws-sdk/client-sqs";
+import {
+  IdempotencyStore,
+  QueueCraftPoller,
+  Semaphore,
+} from "queuecraft";
+
+const concurrency = 5;
+const poller = new QueueCraftPoller({
+  sqsClient: new SQSClient({ region: process.env.AWS_REGION }),
+  queueUrl: process.env.QUEUE_URL!,
+  semaphore: new Semaphore(concurrency),
+  idempotency: new IdempotencyStore({
+    client: new DynamoDBClient({ region: process.env.AWS_REGION }),
+    tableName: process.env.IDEMPOTENCY_TABLE!,
+  }),
+  worker: {
+    concurrency,
+    pollIntervalMs: 250,
+    shutdownTimeoutMs: 30_000,
+  },
+  handler: async (message, context) => {
+    if (context.signal.aborted) return;
+    const job = JSON.parse(message.Body ?? "null");
+    await processJob(job, context.signal);
+  },
+  onError: (error) => console.error(error),
+});
+
+await poller.start();
+```
+
+Call `await poller.stop()` during application shutdown. QueueCraft first lets
+active handlers finish. When `shutdownTimeoutMs` expires, their `AbortSignal`s
+are cancelled and the worker stops extending message visibility. A handler
+that ignores its signal may keep running in application code, but `stop()` will
+not wait forever and the DynamoDB lease can eventually expire.
+
 ## DynamoDB table requirement
 
-The idempotency table must use a String partition key named `messageId`. Enable
-DynamoDB TTL on the Number attribute `expiresAt` for eventual record cleanup.
-Lease correctness does not depend on prompt TTL deletion; QueueCraft checks the
-explicit `leaseUntil` timestamp when taking over abandoned work.
+The idempotency table uses a String partition key named `messageId`. DynamoDB
+TTL should be enabled on the Number attribute `expiresAt`. Correctness does not
+depend on immediate TTL deletion; lease takeover checks `leaseUntil` directly.
 
-## Development
+## Run locally
+
+The package is not on npm yet, so clone this repository first.
 
 ```bash
 npm ci
@@ -69,15 +142,24 @@ npm run typecheck
 npm run build
 ```
 
-The current tests mock AWS. A passing unit test suite does not replace the
-planned end-to-end AWS test.
+The unit tests mock AWS. Passing them does not replace the planned real-AWS
+integration test.
 
-## AWS infrastructure
+## Deploy the AWS resources
 
-The first CloudFormation template and beginner deployment instructions are in
-`infrastructure/`. The template creates a standard queue, DLQ, DynamoDB lease
-table, and separate least-privilege publisher and worker policies.
+The template and beginner deployment instructions are in
+[`infrastructure/`](infrastructure/README.md). The template creates a standard
+queue, DLQ, DynamoDB lease table, separate least-privilege publisher and worker
+policies, and CloudWatch alarms.
 
-For low-volume systems, `QueueCraftLambdaProcessor` lets an SQS event source
-wake Lambda only when jobs arrive. It keeps the same stable-key and DynamoDB
-duplicate protection without paying for an always-running poller.
+## Roadmap
+
+1. Run an automated publish, retry, duplicate, and DLQ test against temporary AWS resources.
+2. Add structured logs, CloudWatch metrics, and tracing hooks.
+3. Add a small local dashboard for queue health and safe DLQ replay.
+4. Publish under an npm scope and create a tagged alpha release.
+5. Document YallaQueue as the end-to-end reference architecture.
+
+## License
+
+MIT

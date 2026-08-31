@@ -24,6 +24,8 @@ import { IDEMPOTENCY_ATTRIBUTE } from "./publisher";
 
 /** SQS hard limit on messages returned per `ReceiveMessage` call. */
 const MAX_SQS_BATCH = 10;
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
+const MAX_ABORT_CLEANUP_MS = 1_000;
 
 /**
  * User-supplied unit of work. Receives the raw SQS message so the caller owns
@@ -86,11 +88,18 @@ export class QueueCraftPoller {
   private readonly batchSize: number;
   private readonly visibilityTimeoutSeconds: number;
   private readonly heartbeatIntervalMs: number;
+  private readonly shutdownTimeoutMs: number;
 
   private running = false;
   private readonly inflight = new Set<Promise<void>>();
+  private readonly activeExecutions = new Map<
+    AbortController,
+    AbortController
+  >();
   private abortController?: AbortController;
   private activeReceive?: Promise<Message[]>;
+  private sleepController?: AbortController;
+  private shutdownPromise?: Promise<void>;
 
   constructor(options: QueueCraftPollerOptions) {
     this.sqs = options.sqsClient;
@@ -111,6 +120,8 @@ export class QueueCraftPoller {
     this.heartbeatIntervalMs =
       options.worker.heartbeatIntervalMs ??
       Math.floor((this.visibilityTimeoutSeconds * 1000) / 2);
+    this.shutdownTimeoutMs =
+      options.worker.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
 
     this.validateOptions(options.worker.concurrency);
   }
@@ -122,10 +133,12 @@ export class QueueCraftPoller {
 
   /**
    * Run the continuous poll loop until `stop()` is called. Resolves once the
-   * loop has exited and all in-flight jobs have drained.
+   * loop has exited and active jobs have drained or reached the configured
+   * shutdown timeout.
    */
   async start(): Promise<void> {
     if (this.running) return;
+    this.shutdownPromise = undefined;
     this.running = true;
 
     while (this.running) {
@@ -159,15 +172,19 @@ export class QueueCraftPoller {
       }
     }
 
-    await this.drain();
+    await this.shutdownAndDrain();
   }
 
-  /** Signal the loop to stop, interrupt any in-flight long poll, and drain. */
+  /**
+   * Stop polling, allow active jobs to finish within the configured grace
+   * period, then cancel them and return without waiting forever.
+   */
   async stop(): Promise<void> {
     this.running = false;
     this.abortController?.abort();
+    this.sleepController?.abort();
     await this.activeReceive?.catch(() => undefined);
-    await this.drain();
+    await this.shutdownAndDrain();
   }
 
   /** Free slots = ceiling minus in-use, clamped to the SQS batch limit. */
@@ -261,6 +278,7 @@ export class QueueCraftPoller {
     const lease = acquisition.lease;
     const handlerController = new AbortController();
     const heartbeatController = new AbortController();
+    this.activeExecutions.set(handlerController, heartbeatController);
     let heartbeatError: unknown;
 
     const heartbeat = this.runHeartbeat(
@@ -287,6 +305,7 @@ export class QueueCraftPoller {
     } finally {
       heartbeatController.abort();
       await heartbeat;
+      this.activeExecutions.delete(handlerController);
     }
 
     if (heartbeatError !== undefined) {
@@ -299,6 +318,16 @@ export class QueueCraftPoller {
       // Drop the owned lease and leave the message for SQS retry/redrive.
       await this.safeRelease(lease);
       this.reportError(handlerError, message);
+      return;
+    }
+
+    if (handlerController.signal.aborted) {
+      await this.safeRelease(lease);
+      this.reportError(
+        handlerController.signal.reason ??
+          new Error("QueueCraft handler cancelled during shutdown."),
+        message,
+      );
       return;
     }
 
@@ -421,6 +450,12 @@ export class QueueCraftPoller {
       1,
       this.visibilityTimeoutSeconds * 1000 - 1,
     );
+    this.assertIntegerInRange(
+      this.shutdownTimeoutMs,
+      "shutdownTimeoutMs",
+      0,
+      Number.MAX_SAFE_INTEGER,
+    );
   }
 
   private assertIntegerInRange(
@@ -448,7 +483,74 @@ export class QueueCraftPoller {
     await Promise.allSettled([...this.inflight]);
   }
 
+  private shutdownAndDrain(): Promise<void> {
+    this.shutdownPromise ??= this.performBoundedDrain();
+    return this.shutdownPromise;
+  }
+
+  private async performBoundedDrain(): Promise<void> {
+    if (this.inflight.size === 0) return;
+
+    const drainedNaturally = await this.drainWithin(this.shutdownTimeoutMs);
+    if (drainedNaturally) return;
+
+    const reason = new Error(
+      `QueueCraft graceful shutdown timed out after ${this.shutdownTimeoutMs}ms.`,
+    );
+    for (const [handlerController, heartbeatController] of
+      this.activeExecutions) {
+      heartbeatController.abort(reason);
+      handlerController.abort(reason);
+    }
+
+    const cleanupMs = Math.min(
+      MAX_ABORT_CLEANUP_MS,
+      Math.max(10, this.shutdownTimeoutMs),
+    );
+    await this.drainWithin(cleanupMs);
+  }
+
+  private drainWithin(timeoutMs: number): Promise<boolean> {
+    if (this.inflight.size === 0) return Promise.resolve(true);
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const timeout = setTimeout(() => {
+        settled = true;
+        resolve(false);
+      }, timeoutMs);
+
+      void this.drain().then(() => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve(true);
+      });
+    });
+  }
+
   private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    this.sleepController = new AbortController();
+    const controller = this.sleepController;
+
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        controller.signal.removeEventListener("abort", onAbort);
+        if (this.sleepController === controller) {
+          this.sleepController = undefined;
+        }
+        resolve();
+      }, ms);
+
+      const onAbort = () => {
+        clearTimeout(timeout);
+        if (this.sleepController === controller) {
+          this.sleepController = undefined;
+        }
+        resolve();
+      };
+
+      controller.signal.addEventListener("abort", onAbort, { once: true });
+    });
   }
 }

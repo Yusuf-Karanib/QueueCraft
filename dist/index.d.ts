@@ -126,6 +126,11 @@ interface WorkerOptions {
      * Must be shorter than the visibility timeout. Defaults to half of it.
      */
     readonly heartbeatIntervalMs?: number;
+    /**
+     * Time to let active handlers finish after stop() is called before their
+     * AbortSignals are cancelled. Defaults to 30 seconds.
+     */
+    readonly shutdownTimeoutMs?: number;
 }
 
 /**
@@ -291,19 +296,27 @@ declare class QueueCraftPoller {
     private readonly batchSize;
     private readonly visibilityTimeoutSeconds;
     private readonly heartbeatIntervalMs;
+    private readonly shutdownTimeoutMs;
     private running;
     private readonly inflight;
+    private readonly activeExecutions;
     private abortController?;
     private activeReceive?;
+    private sleepController?;
+    private shutdownPromise?;
     constructor(options: QueueCraftPollerOptions);
     /** Whether the poll loop is currently active. */
     get isRunning(): boolean;
     /**
      * Run the continuous poll loop until `stop()` is called. Resolves once the
-     * loop has exited and all in-flight jobs have drained.
+     * loop has exited and active jobs have drained or reached the configured
+     * shutdown timeout.
      */
     start(): Promise<void>;
-    /** Signal the loop to stop, interrupt any in-flight long poll, and drain. */
+    /**
+     * Stop polling, allow active jobs to finish within the configured grace
+     * period, then cancel them and return without waiting forever.
+     */
     stop(): Promise<void>;
     /** Free slots = ceiling minus in-use, clamped to the SQS batch limit. */
     private availableCapacity;
@@ -323,6 +336,9 @@ declare class QueueCraftPoller {
     private assertIntegerInRange;
     private reportError;
     private drain;
+    private shutdownAndDrain;
+    private performBoundedDrain;
+    private drainWithin;
     private sleep;
 }
 

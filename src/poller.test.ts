@@ -330,4 +330,40 @@ describe("QueueCraftPoller", () => {
       VisibilityTimeout: 0,
     });
   });
+
+  it("cancels a handler after the graceful-shutdown timeout", async () => {
+    const harness = createHarness(
+      async (_message, context) => {
+        await new Promise<void>((resolve) => {
+          context.signal.addEventListener("abort", () => resolve(), {
+            once: true,
+          });
+        });
+      },
+      undefined,
+      { shutdownTimeoutMs: 5 },
+    );
+
+    const started = harness.poller.start();
+    await vi.waitFor(() => expect(harness.handler).toHaveBeenCalledTimes(1));
+    await harness.poller.stop();
+    await started;
+
+    expect(commandsOfType(harness.sqsSend, "DeleteMessage")).toHaveLength(0);
+    expect(commandsOfType(harness.dynamoSend, "DeleteItem")).toHaveLength(1);
+    expect(harness.onError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: "QueueCraft graceful shutdown timed out after 5ms.",
+      }),
+      harness.message,
+    );
+  });
+
+  it("rejects a negative graceful-shutdown timeout", () => {
+    expect(() =>
+      createHarness(async () => undefined, undefined, {
+        shutdownTimeoutMs: -1,
+      }),
+    ).toThrow("shutdownTimeoutMs must be an integer between 0");
+  });
 });

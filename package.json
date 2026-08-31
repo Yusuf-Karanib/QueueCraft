@@ -27,8 +27,16 @@
     "queue",
     "worker"
   ],
-  "author": "",
-  "license": "ISC",
+  "author": "Yusuf Karanib",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Yusuf-Karanib/QueueCraft.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Yusuf-Karanib/QueueCraft/issues"
+  },
+  "homepage": "https://github.com/Yusuf-Karanib/QueueCraft#readme",
   "engines": {
     "node": ">=20"
   },

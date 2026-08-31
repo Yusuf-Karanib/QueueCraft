@@ -64,6 +64,8 @@ import {
 } from "@aws-sdk/client-sqs";
 import { randomUUID as randomUUID2 } from "crypto";
 var MAX_SQS_BATCH = 10;
+var DEFAULT_SHUTDOWN_TIMEOUT_MS = 3e4;
+var MAX_ABORT_CLEANUP_MS = 1e3;
 var QueueCraftPoller = class {
   sqs;
   semaphore;
@@ -78,10 +80,14 @@ var QueueCraftPoller = class {
   batchSize;
   visibilityTimeoutSeconds;
   heartbeatIntervalMs;
+  shutdownTimeoutMs;
   running = false;
   inflight = /* @__PURE__ */ new Set();
+  activeExecutions = /* @__PURE__ */ new Map();
   abortController;
   activeReceive;
+  sleepController;
+  shutdownPromise;
   constructor(options) {
     this.sqs = options.sqsClient;
     this.semaphore = options.semaphore;
@@ -96,6 +102,7 @@ var QueueCraftPoller = class {
     this.batchSize = options.worker.batchSize ?? MAX_SQS_BATCH;
     this.visibilityTimeoutSeconds = options.worker.visibilityTimeoutSeconds ?? 60;
     this.heartbeatIntervalMs = options.worker.heartbeatIntervalMs ?? Math.floor(this.visibilityTimeoutSeconds * 1e3 / 2);
+    this.shutdownTimeoutMs = options.worker.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
     this.validateOptions(options.worker.concurrency);
   }
   /** Whether the poll loop is currently active. */
@@ -104,10 +111,12 @@ var QueueCraftPoller = class {
   }
   /**
    * Run the continuous poll loop until `stop()` is called. Resolves once the
-   * loop has exited and all in-flight jobs have drained.
+   * loop has exited and active jobs have drained or reached the configured
+   * shutdown timeout.
    */
   async start() {
     if (this.running) return;
+    this.shutdownPromise = void 0;
     this.running = true;
     while (this.running) {
       const capacity = this.availableCapacity();
@@ -132,14 +141,18 @@ var QueueCraftPoller = class {
         this.dispatch(message);
       }
     }
-    await this.drain();
+    await this.shutdownAndDrain();
   }
-  /** Signal the loop to stop, interrupt any in-flight long poll, and drain. */
+  /**
+   * Stop polling, allow active jobs to finish within the configured grace
+   * period, then cancel them and return without waiting forever.
+   */
   async stop() {
     this.running = false;
     this.abortController?.abort();
+    this.sleepController?.abort();
     await this.activeReceive?.catch(() => void 0);
-    await this.drain();
+    await this.shutdownAndDrain();
   }
   /** Free slots = ceiling minus in-use, clamped to the SQS batch limit. */
   availableCapacity() {
@@ -211,6 +224,7 @@ var QueueCraftPoller = class {
     const lease = acquisition.lease;
     const handlerController = new AbortController();
     const heartbeatController = new AbortController();
+    this.activeExecutions.set(handlerController, heartbeatController);
     let heartbeatError;
     const heartbeat = this.runHeartbeat(
       lease,
@@ -234,6 +248,7 @@ var QueueCraftPoller = class {
     } finally {
       heartbeatController.abort();
       await heartbeat;
+      this.activeExecutions.delete(handlerController);
     }
     if (heartbeatError !== void 0) {
       return;
@@ -241,6 +256,14 @@ var QueueCraftPoller = class {
     if (handlerError !== void 0) {
       await this.safeRelease(lease);
       this.reportError(handlerError, message);
+      return;
+    }
+    if (handlerController.signal.aborted) {
+      await this.safeRelease(lease);
+      this.reportError(
+        handlerController.signal.reason ?? new Error("QueueCraft handler cancelled during shutdown."),
+        message
+      );
       return;
     }
     try {
@@ -336,6 +359,12 @@ var QueueCraftPoller = class {
       1,
       this.visibilityTimeoutSeconds * 1e3 - 1
     );
+    this.assertIntegerInRange(
+      this.shutdownTimeoutMs,
+      "shutdownTimeoutMs",
+      0,
+      Number.MAX_SAFE_INTEGER
+    );
   }
   assertIntegerInRange(value, name, minimum, maximum) {
     if (!Number.isInteger(value) || value < minimum || value > maximum) {
@@ -353,8 +382,63 @@ var QueueCraftPoller = class {
   async drain() {
     await Promise.allSettled([...this.inflight]);
   }
+  shutdownAndDrain() {
+    this.shutdownPromise ??= this.performBoundedDrain();
+    return this.shutdownPromise;
+  }
+  async performBoundedDrain() {
+    if (this.inflight.size === 0) return;
+    const drainedNaturally = await this.drainWithin(this.shutdownTimeoutMs);
+    if (drainedNaturally) return;
+    const reason = new Error(
+      `QueueCraft graceful shutdown timed out after ${this.shutdownTimeoutMs}ms.`
+    );
+    for (const [handlerController, heartbeatController] of this.activeExecutions) {
+      heartbeatController.abort(reason);
+      handlerController.abort(reason);
+    }
+    const cleanupMs = Math.min(
+      MAX_ABORT_CLEANUP_MS,
+      Math.max(10, this.shutdownTimeoutMs)
+    );
+    await this.drainWithin(cleanupMs);
+  }
+  drainWithin(timeoutMs) {
+    if (this.inflight.size === 0) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      let settled = false;
+      const timeout = setTimeout(() => {
+        settled = true;
+        resolve(false);
+      }, timeoutMs);
+      void this.drain().then(() => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve(true);
+      });
+    });
+  }
   sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    this.sleepController = new AbortController();
+    const controller = this.sleepController;
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        controller.signal.removeEventListener("abort", onAbort);
+        if (this.sleepController === controller) {
+          this.sleepController = void 0;
+        }
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(timeout);
+        if (this.sleepController === controller) {
+          this.sleepController = void 0;
+        }
+        resolve();
+      };
+      controller.signal.addEventListener("abort", onAbort, { once: true });
+    });
   }
 };
 
