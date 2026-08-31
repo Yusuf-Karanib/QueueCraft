@@ -162,6 +162,11 @@ The template and beginner deployment instructions are in
 queue, DLQ, DynamoDB lease table, separate least-privilege publisher and worker
 policies, and CloudWatch alarms.
 
+See [`docs/observability.md`](docs/observability.md) for safe event logging and
+suggested metrics. See
+[`docs/yallaqueue-reference.md`](docs/yallaqueue-reference.md) for the first
+end-to-end application built on QueueCraft.
+
 ## Roadmap
 
 1. Automate the guarded AWS test with temporary resources and short-lived credentials.
