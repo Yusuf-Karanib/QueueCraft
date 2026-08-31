@@ -24,11 +24,12 @@ Implemented:
 - SQS visibility and DynamoDB lease heartbeats for long jobs
 - Bounded graceful shutdown with handler cancellation
 - CloudFormation for a standard queue, DLQ, DynamoDB table, IAM policies, and alarms
+- Guarded integration runner verified against real SQS and DynamoDB
 - Automated checks for Node.js 20 and 22
 
 Not implemented yet:
 
-- Integration tests against temporary real AWS resources
+- Automated creation and cleanup of temporary AWS integration resources in CI
 - Structured logs, custom metrics, and tracing
 - A local queue and DLQ dashboard
 - A published npm package
@@ -148,7 +149,9 @@ integration test.
 A guarded real-AWS test runner is included in
 [`docs/aws-integration-test.md`](docs/aws-integration-test.md). It must be run
 against a dedicated test stack; it deliberately refuses to use a non-empty
-queue. Until its result is captured in CI, the project status remains alpha.
+queue. Its first passing AWS run is recorded in
+[`docs/verification.md`](docs/verification.md). Until this test is automated in
+CI and repeated regularly, the project status remains alpha.
 
 ## Deploy the AWS resources
 
@@ -159,7 +162,7 @@ policies, and CloudWatch alarms.
 
 ## Roadmap
 
-1. Run the guarded publish, retry, duplicate, and DLQ test and automate it with temporary AWS resources.
+1. Automate the guarded AWS test with temporary resources and short-lived credentials.
 2. Add structured logs, CloudWatch metrics, and tracing hooks.
 3. Add a small local dashboard for queue health and safe DLQ replay.
 4. Publish under an npm scope and create a tagged alpha release.

@@ -42,3 +42,9 @@ npm run test:aws
 The test refuses to start unless both queues appear empty. It deletes its own
 DLQ message and DynamoDB records when finished. Delete the CloudFormation test
 stack afterward so unused resources do not remain in the account.
+
+## Verified run
+
+The first real-AWS run passed on 2026-08-31 in `eu-central-1`. The temporary
+stack was deleted immediately afterward. See `docs/verification.md` for the
+recorded checks.
