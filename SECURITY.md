@@ -16,6 +16,8 @@ and a minimal reproduction.
 - Use separate least-privilege identities for publishers, workers, dashboards,
   and infrastructure deployment.
 - Prefer short-lived AWS and npm credentials over stored access keys.
+- GitHub Actions must use the immutable repository-ID OIDC trust documented in
+  `docs/aws-ci.md`; do not replace it with a broad repository wildcard.
 - Rotate a credential immediately if it appears in logs, screenshots, commits,
   or chat.
 

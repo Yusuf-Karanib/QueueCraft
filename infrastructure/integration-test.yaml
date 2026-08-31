@@ -1,0 +1,70 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Temporary QueueCraft resources for the guarded real-AWS integration test.
+
+Parameters:
+  ProjectName:
+    Type: String
+    AllowedPattern: "queuecraft-ci-[0-9]+-[0-9]+"
+    Description: Unique prefix derived from the GitHub Actions run and attempt IDs.
+
+Resources:
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ProjectName}-jobs-dlq"
+      MessageRetentionPeriod: 1200
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Project
+          Value: queuecraft
+        - Key: Purpose
+          Value: integration-test
+
+  JobQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ProjectName}-jobs"
+      MessageRetentionPeriod: 1200
+      ReceiveMessageWaitTimeSeconds: 1
+      VisibilityTimeout: 1
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DeadLetterQueue.Arn
+        maxReceiveCount: 2
+      Tags:
+        - Key: Project
+          Value: queuecraft
+        - Key: Purpose
+          Value: integration-test
+
+  IdempotencyTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ProjectName}-leases"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: messageId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: messageId
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Project
+          Value: queuecraft
+        - Key: Purpose
+          Value: integration-test
+
+Outputs:
+  QueueUrl:
+    Value: !Ref JobQueue
+
+  DeadLetterQueueUrl:
+    Value: !Ref DeadLetterQueue
+
+  IdempotencyTableName:
+    Value: !Ref IdempotencyTable

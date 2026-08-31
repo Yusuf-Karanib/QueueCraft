@@ -22,6 +22,10 @@ Paid point-in-time recovery is disabled by default.
 The template creates policies, not users or access keys. Do not put AWS keys in
 GitHub. Decide how Replit will receive an AWS identity before creating keys.
 
+GitHub's isolated integration tests use short-lived OIDC credentials instead
+of access keys. The one-time trust template and its security boundary are
+explained in [`../docs/aws-ci.md`](../docs/aws-ci.md).
+
 ## Deploy from the AWS console
 
 1. Open CloudFormation in the AWS region you want to use.
@@ -54,3 +58,12 @@ SQS-triggered Lambda function, must use the queue and table outputs.
 The first environment deliberately uses a standard queue. It is designed to
 exercise real at-least-once delivery and duplicate handling. FIFO ordering can
 be added later after message-group behavior is specified and tested.
+
+## Automation templates
+
+- `integration-test.yaml` creates only temporary SQS and DynamoDB test
+  resources.
+- `github-oidc.yaml` creates the long-lived GitHub identity provider and its
+  narrowly scoped test role.
+
+Neither template grants access to YallaQueue's queues or tables.

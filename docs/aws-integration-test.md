@@ -13,7 +13,12 @@ Use a separate QueueCraft test stack whose main queue and DLQ are empty.
 
 ## Prepare the test stack
 
-Create a second CloudFormation stack from `infrastructure/cloudformation.yaml`.
+GitHub Actions uses `infrastructure/integration-test.yaml` to create and delete
+an isolated stack automatically. See `docs/aws-ci.md` for that design.
+
+For a manual run, create a second CloudFormation stack from
+`infrastructure/cloudformation.yaml`.
+
 Use these parameter values:
 
 - `ProjectName`: `queuecrafttest`

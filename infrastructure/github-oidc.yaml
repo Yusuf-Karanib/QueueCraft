@@ -1,0 +1,138 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: One-time GitHub OIDC trust and least-privilege QueueCraft integration-test role.
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Default: Yusuf-Karanib
+
+  GitHubOwnerId:
+    Type: String
+    Default: "240980687"
+    AllowedPattern: "[0-9]+"
+
+  GitHubRepository:
+    Type: String
+    Default: QueueCraft
+
+  GitHubRepositoryId:
+    Type: String
+    Default: "1308168974"
+    AllowedPattern: "[0-9]+"
+
+  GitHubBranch:
+    Type: String
+    Default: main
+
+  RoleName:
+    Type: String
+    Default: queuecraft-github-integration
+
+  CreateGitHubOidcProvider:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Set false when this AWS account already has GitHub's OIDC provider.
+
+  ExistingGitHubOidcProviderArn:
+    Type: String
+    Default: ""
+    Description: Required when CreateGitHubOidcProvider is false.
+
+Conditions:
+  ShouldCreateGitHubOidcProvider: !Equals
+    - !Ref CreateGitHubOidcProvider
+    - "true"
+
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateGitHubOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      Tags:
+        - Key: Project
+          Value: queuecraft
+        - Key: Purpose
+          Value: github-actions-oidc
+
+  GitHubIntegrationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      Description: Short-lived GitHub Actions identity for isolated QueueCraft AWS tests.
+      MaxSessionDuration: 1800
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: TrustOnlyQueueCraftMain
+            Effect: Allow
+            Principal:
+              Federated: !If
+                - ShouldCreateGitHubOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Ref ExistingGitHubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOwner}@${GitHubOwnerId}/${GitHubRepository}@${GitHubRepositoryId}:ref:refs/heads/${GitHubBranch}"
+      Policies:
+        - PolicyName: queuecraft-isolated-integration-test
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ManageOnlyQueueCraftCiStacks
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ListStackResources
+                Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/queuecraft-ci-*/*"
+              - Sid: ManageOnlyQueueCraftCiQueues
+                Effect: Allow
+                Action:
+                  - sqs:ChangeMessageVisibility
+                  - sqs:CreateQueue
+                  - sqs:DeleteMessage
+                  - sqs:DeleteQueue
+                  - sqs:GetQueueAttributes
+                  - sqs:GetQueueUrl
+                  - sqs:ListQueueTags
+                  - sqs:ReceiveMessage
+                  - sqs:SendMessage
+                  - sqs:SetQueueAttributes
+                  - sqs:TagQueue
+                  - sqs:UntagQueue
+                Resource: !Sub "arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:queuecraft-ci-*"
+              - Sid: ManageOnlyQueueCraftCiLeaseTables
+                Effect: Allow
+                Action:
+                  - dynamodb:CreateTable
+                  - dynamodb:DeleteItem
+                  - dynamodb:DeleteTable
+                  - dynamodb:DescribeContinuousBackups
+                  - dynamodb:DescribeTable
+                  - dynamodb:DescribeTimeToLive
+                  - dynamodb:GetItem
+                  - dynamodb:ListTagsOfResource
+                  - dynamodb:TagResource
+                  - dynamodb:UntagResource
+                  - dynamodb:UpdateItem
+                  - dynamodb:UpdateTimeToLive
+                Resource: !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/queuecraft-ci-*"
+
+Outputs:
+  GitHubActionsRoleArn:
+    Description: Role used by aws-actions/configure-aws-credentials.
+    Value: !GetAtt GitHubIntegrationRole.Arn
+
+  TrustedSubject:
+    Description: Exact immutable GitHub OIDC subject accepted by the role.
+    Value: !Sub "repo:${GitHubOwner}@${GitHubOwnerId}/${GitHubRepository}@${GitHubRepositoryId}:ref:refs/heads/${GitHubBranch}"

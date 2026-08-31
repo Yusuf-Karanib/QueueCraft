@@ -1,0 +1,74 @@
+name: AWS integration
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: queuecraft-aws-integration
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-central-1
+  AWS_ROLE_ARN: arn:aws:iam::337890360305:role/queuecraft-github-integration
+  STACK_NAME: queuecraft-ci-${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  verify-real-aws:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run build
+
+      - name: Get short-lived AWS credentials
+        id: aws
+        uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-session-name: QueueCraft-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: "337890360305"
+          unset-current-credentials: true
+
+      - name: Create isolated AWS test stack
+        run: |
+          aws cloudformation create-stack \
+            --stack-name "$STACK_NAME" \
+            --template-body file://infrastructure/integration-test.yaml \
+            --parameters ParameterKey=ProjectName,ParameterValue="$STACK_NAME" \
+            --on-failure DELETE \
+            --tags Key=Project,Value=queuecraft Key=Purpose,Value=integration-test
+          aws cloudformation wait stack-create-complete --stack-name "$STACK_NAME"
+
+      - name: Read isolated stack outputs
+        run: |
+          echo "SQS_QUEUE_URL=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query "Stacks[0].Outputs[?OutputKey=='QueueUrl'].OutputValue" --output text)" >> "$GITHUB_ENV"
+          echo "SQS_DLQ_URL=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query "Stacks[0].Outputs[?OutputKey=='DeadLetterQueueUrl'].OutputValue" --output text)" >> "$GITHUB_ENV"
+          echo "DYNAMODB_TABLE_NAME=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query "Stacks[0].Outputs[?OutputKey=='IdempotencyTableName'].OutputValue" --output text)" >> "$GITHUB_ENV"
+
+      - name: Run guarded real-AWS test
+        env:
+          QUEUECRAFT_AWS_TEST_CONFIRM: dedicated-queuecraft-test-stack
+        run: npm run test:aws
+
+      - name: Delete isolated AWS test stack
+        if: ${{ always() && steps.aws.outcome == 'success' }}
+        run: |
+          if aws cloudformation describe-stacks --stack-name "$STACK_NAME" >/dev/null 2>&1; then
+            aws cloudformation delete-stack --stack-name "$STACK_NAME"
+            aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
+          fi
