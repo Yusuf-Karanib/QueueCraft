@@ -1,5 +1,30 @@
 # Verification record
 
+## 2026-09-01 — CloudWatch metrics and tracing adapters
+
+Source commit: `ee04054`
+
+GitHub Actions runs:
+
+- [CI `33417584405`](https://github.com/Yusuf-Karanib/QueueCraft/actions/runs/33417584405)
+- [AWS integration `33417584478`](https://github.com/Yusuf-Karanib/QueueCraft/actions/runs/33417584478)
+
+Verified behavior:
+
+- PASS: 30 tests covered metric mapping, batching, retries, tracing lifecycle,
+  Lambda events, and observer failure isolation;
+- PASS: privacy assertions proved idempotency keys are not exported as metric
+  data or span attributes;
+- PASS: the adapter accepts the official AWS CloudWatch client;
+- PASS: production dependencies reported no known vulnerabilities;
+- PASS: AWS accepted the updated CloudFormation template;
+- PASS: the existing real SQS, DynamoDB, retry, and DLQ integration still
+  passed and its isolated stack was deleted.
+
+The test did not publish a permanent custom CloudWatch metric or configure a
+tracing exporter. Those actions can create lasting telemetry and AWS charges,
+so applications opt into them explicitly.
+
 ## 2026-08-31 — automated isolated AWS integration
 
 Source commit: `42c4744`
