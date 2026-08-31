@@ -67,7 +67,7 @@ messages to the DLQ.
 npm install @yusufkaranib/queuecraft
 ```
 
-Version `0.1.1` is the current public alpha. Pin the version for controlled pilots
+Version `0.2.0` is the current public alpha. Pin the version for controlled pilots
 and review the changelog before upgrading.
 
 ## Publishing a job
@@ -144,9 +144,6 @@ not wait forever and the DynamoDB lease can eventually expire.
 
 QueueCraft can turn the same payload-free lifecycle events into CloudWatch
 metrics and OpenTelemetry-compatible spans:
-
-> These APIs are currently on `main` and are planned for the next minor npm
-> release.
 
 ```ts
 import { CloudWatchClient } from "@aws-sdk/client-cloudwatch";

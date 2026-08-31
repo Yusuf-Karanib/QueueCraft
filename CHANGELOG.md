@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-09-01
 
 - Added buffered CloudWatch lifecycle metrics with bounded, privacy-safe
   dimensions.
