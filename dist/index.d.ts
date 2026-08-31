@@ -1,5 +1,6 @@
 import { SQSClient, Message } from '@aws-sdk/client-sqs';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { PutMetricDataCommand, MetricDatum } from '@aws-sdk/client-cloudwatch';
 
 /**
  * QueueCraft — publisher
@@ -395,6 +396,7 @@ interface QueueCraftLambdaProcessorOptions {
     readonly concurrency?: number;
     readonly idempotencyAttribute?: string;
     readonly onError?: (error: unknown, record?: LambdaSqsRecord) => void;
+    readonly onEvent?: (event: QueueCraftEvent) => void;
 }
 interface LambdaProcessOptions {
     readonly signal?: AbortSignal;
@@ -410,6 +412,7 @@ declare class QueueCraftLambdaProcessor {
     private readonly semaphore;
     private readonly idempotencyAttribute;
     private readonly onError?;
+    private readonly onEvent?;
     constructor(options: QueueCraftLambdaProcessorOptions);
     process(event: LambdaSqsEvent, options?: LambdaProcessOptions): Promise<LambdaSqsBatchResponse>;
     private processRecord;
@@ -417,6 +420,7 @@ declare class QueueCraftLambdaProcessor {
     private receiveCount;
     private safeRelease;
     private reportError;
+    private reportEvent;
 }
 
 interface QueueCraftDashboardOptions {
@@ -436,4 +440,99 @@ interface QueueCraftDashboard {
 }
 declare function createQueueCraftDashboard(options: QueueCraftDashboardOptions): Promise<QueueCraftDashboard>;
 
-export { type AcquireLockResult, type EpochMillis, type ExecutionLease, IDEMPOTENCY_ATTRIBUTE, IdempotencyStore, type IdempotencyStoreOptions, type Job, type JobContext, type JobHandler, type JobStatus, type LambdaBatchItemFailure, type LambdaProcessOptions, type LambdaSqsBatchResponse, type LambdaSqsEvent, type LambdaSqsMessageAttribute, type LambdaSqsRecord, LeaseState, type PublishOptions, type PublishResult, type QueueCraftConfig, type QueueCraftDashboard, type QueueCraftDashboardOptions, type QueueCraftEvent, QueueCraftLambdaProcessor, type QueueCraftLambdaProcessorOptions, QueueCraftPoller, type QueueCraftPollerOptions, QueueCraftPublisher, type QueueCraftPublisherOptions, Semaphore, type WorkerOptions, createQueueCraftDashboard };
+interface QueueCraftCloudWatchMetricMappingOptions {
+    /** Low-cardinality dimensions applied to every metric. */
+    readonly dimensions?: Readonly<Record<string, string>>;
+    /** Clock override, primarily for deterministic tests. */
+    readonly now?: () => Date;
+}
+interface QueueCraftCloudWatchClient {
+    send(command: PutMetricDataCommand): Promise<unknown>;
+}
+interface QueueCraftCloudWatchMetricsOptions extends QueueCraftCloudWatchMetricMappingOptions {
+    readonly client: QueueCraftCloudWatchClient;
+    /** Custom metric namespace. Must not start with the reserved `AWS/` prefix. */
+    readonly namespace?: string;
+    /** Number of metric data points sent in one request. Valid range: 1-1000. */
+    readonly maxBatchSize?: number;
+    /** Maximum time metrics remain buffered. Set to 0 for manual flushing only. */
+    readonly flushIntervalMs?: number;
+    /** Optional observer for CloudWatch delivery errors. Never throws. */
+    readonly onError?: (error: unknown) => void;
+}
+/**
+ * Converts one payload-free QueueCraft event into low-cardinality CloudWatch
+ * metric data. Idempotency keys are deliberately never copied into metrics.
+ */
+declare function mapQueueCraftEventToCloudWatchMetrics(event: QueueCraftEvent, options?: QueueCraftCloudWatchMetricMappingOptions): readonly MetricDatum[];
+/** Buffered CloudWatch writer designed to be passed directly to `onEvent`. */
+declare class QueueCraftCloudWatchMetrics {
+    private readonly client;
+    private readonly namespace;
+    private readonly mappingOptions;
+    private readonly maxBatchSize;
+    private readonly flushIntervalMs;
+    private readonly onError?;
+    private readonly pending;
+    private timer?;
+    private activeFlush?;
+    private closed;
+    constructor(options: QueueCraftCloudWatchMetricsOptions);
+    /** Synchronous, failure-isolated observer for `QueueCraftPoller.onEvent`. */
+    readonly onEvent: (event: QueueCraftEvent) => void;
+    /** Sends all currently buffered metrics. Failed batches stay queued for retry. */
+    flush(): Promise<void>;
+    /** Stops the timer and flushes remaining metrics. */
+    close(): Promise<void>;
+    get pendingMetricCount(): number;
+    private flushPending;
+    private scheduleFlush;
+    private clearTimer;
+    private reportError;
+    private validateOptions;
+}
+
+type QueueCraftSpanAttributeValue = string | number | boolean;
+type QueueCraftSpanAttributes = Readonly<Record<string, QueueCraftSpanAttributeValue>>;
+/** Small structural subset implemented by OpenTelemetry spans. */
+interface QueueCraftTraceSpan {
+    setAttribute(name: string, value: QueueCraftSpanAttributeValue): void;
+    end(): void;
+}
+/** Small structural subset implemented by an OpenTelemetry tracer. */
+interface QueueCraftTracer {
+    startSpan(name: string, options?: {
+        readonly attributes?: QueueCraftSpanAttributes;
+    }): QueueCraftTraceSpan;
+}
+interface QueueCraftTracingObserverOptions {
+    readonly tracer: QueueCraftTracer;
+    readonly spanName?: string;
+    readonly attributes?: QueueCraftSpanAttributes;
+    readonly onError?: (error: unknown) => void;
+}
+/**
+ * Converts QueueCraft lifecycle events into spans without attaching message
+ * bodies or idempotency keys as span attributes.
+ */
+declare class QueueCraftTracingObserver {
+    private readonly tracer;
+    private readonly spanName;
+    private readonly attributes;
+    private readonly onError?;
+    private readonly active;
+    private closed;
+    constructor(options: QueueCraftTracingObserverOptions);
+    /** Synchronous, failure-isolated observer for QueueCraft lifecycle events. */
+    readonly onEvent: (event: QueueCraftEvent) => void;
+    /** Ends any spans that never received a terminal QueueCraft event. */
+    close(): void;
+    get activeSpanCount(): number;
+    private startJob;
+    private finishJob;
+    private recordInstantSpan;
+    private finishSpan;
+    private reportError;
+}
+
+export { type AcquireLockResult, type EpochMillis, type ExecutionLease, IDEMPOTENCY_ATTRIBUTE, IdempotencyStore, type IdempotencyStoreOptions, type Job, type JobContext, type JobHandler, type JobStatus, type LambdaBatchItemFailure, type LambdaProcessOptions, type LambdaSqsBatchResponse, type LambdaSqsEvent, type LambdaSqsMessageAttribute, type LambdaSqsRecord, LeaseState, type PublishOptions, type PublishResult, type QueueCraftCloudWatchClient, type QueueCraftCloudWatchMetricMappingOptions, QueueCraftCloudWatchMetrics, type QueueCraftCloudWatchMetricsOptions, type QueueCraftConfig, type QueueCraftDashboard, type QueueCraftDashboardOptions, type QueueCraftEvent, QueueCraftLambdaProcessor, type QueueCraftLambdaProcessorOptions, QueueCraftPoller, type QueueCraftPollerOptions, QueueCraftPublisher, type QueueCraftPublisherOptions, type QueueCraftSpanAttributeValue, type QueueCraftSpanAttributes, type QueueCraftTraceSpan, type QueueCraftTracer, QueueCraftTracingObserver, type QueueCraftTracingObserverOptions, Semaphore, type WorkerOptions, createQueueCraftDashboard, mapQueueCraftEventToCloudWatchMetrics };

@@ -43,6 +43,7 @@ The important outputs are:
 - `AwsRegion`
 - `QueueUrl`
 - `IdempotencyTableName`
+- `MetricsNamespace`
 - `ProducerPolicyArn`
 - `ConsumerPolicyArn`
 - `DashboardPolicyArn`

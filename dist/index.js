@@ -585,6 +585,7 @@ var QueueCraftLambdaProcessor = class {
   semaphore;
   idempotencyAttribute;
   onError;
+  onEvent;
   constructor(options) {
     const concurrency = options.concurrency ?? 10;
     this.idempotency = options.idempotency;
@@ -592,9 +593,16 @@ var QueueCraftLambdaProcessor = class {
     this.semaphore = new Semaphore(concurrency);
     this.idempotencyAttribute = options.idempotencyAttribute ?? IDEMPOTENCY_ATTRIBUTE;
     this.onError = options.onError;
+    this.onEvent = options.onEvent;
   }
   async process(event, options = {}) {
     const signal = options.signal ?? new AbortController().signal;
+    if (event.Records.length > 0) {
+      this.reportEvent({
+        type: "messages_received",
+        count: event.Records.length
+      });
+    }
     const results = await Promise.all(
       event.Records.map(
         (record) => this.semaphore.run(() => this.processRecord(record, signal))
@@ -622,18 +630,31 @@ var QueueCraftLambdaProcessor = class {
       return false;
     }
     if (acquisition.status === "completed") {
+      this.reportEvent({
+        type: "job_duplicate",
+        idempotencyKey,
+        state: "completed"
+      });
       return true;
     }
     if (acquisition.status !== "acquired") {
+      this.reportEvent({
+        type: "job_duplicate",
+        idempotencyKey,
+        state: acquisition.status
+      });
       return false;
     }
     const lease = acquisition.lease;
     let handlerReturned = false;
+    const attempt = this.receiveCount(record);
+    const startedAt = Date.now();
+    this.reportEvent({ type: "job_started", idempotencyKey, attempt });
     try {
       const message = this.toSdkMessage(record);
       const context = {
         idempotencyKey,
-        attempt: this.receiveCount(record),
+        attempt,
         signal
       };
       await this.handler(message, context);
@@ -642,11 +663,23 @@ var QueueCraftLambdaProcessor = class {
         throw new Error("Lambda invocation is ending before job completion.");
       }
       await this.idempotency.markComplete(lease);
+      this.reportEvent({
+        type: "job_completed",
+        idempotencyKey,
+        attempt,
+        durationMs: Date.now() - startedAt
+      });
       return true;
     } catch (error) {
       if (!handlerReturned) {
         await this.safeRelease(lease, record);
       }
+      this.reportEvent({
+        type: signal.aborted ? "job_cancelled" : "job_failed",
+        idempotencyKey,
+        attempt,
+        durationMs: Date.now() - startedAt
+      });
       this.reportError(error, record);
       return false;
     }
@@ -681,6 +714,12 @@ var QueueCraftLambdaProcessor = class {
   reportError(error, record) {
     try {
       this.onError?.(error, record);
+    } catch {
+    }
+  }
+  reportEvent(event) {
+    try {
+      this.onEvent?.(event);
     } catch {
     }
   }
@@ -880,13 +919,332 @@ var IdempotencyStore = class {
     }
   }
 };
+
+// src/cloudwatch-metrics.ts
+import {
+  PutMetricDataCommand
+} from "@aws-sdk/client-cloudwatch";
+var DEFAULT_NAMESPACE = "QueueCraft";
+var DEFAULT_BATCH_SIZE = 20;
+var DEFAULT_FLUSH_INTERVAL_MS = 1e4;
+var MAX_METRICS_PER_REQUEST = 1e3;
+var MAX_USER_DIMENSIONS = 29;
+function mapQueueCraftEventToCloudWatchMetrics(event, options = {}) {
+  validateDimensions(options.dimensions);
+  const dimensions = toDimensions(options.dimensions);
+  const timestamp = (options.now ?? (() => /* @__PURE__ */ new Date()))();
+  const metric = (name, value, unit, extraDimensions = []) => ({
+    MetricName: name,
+    Value: value,
+    Unit: unit,
+    Timestamp: timestamp,
+    Dimensions: [...dimensions, ...extraDimensions]
+  });
+  switch (event.type) {
+    case "messages_received":
+      return [metric("MessagesReceived", event.count, "Count")];
+    case "job_started":
+      return [metric("JobsStarted", 1, "Count")];
+    case "job_completed":
+    case "job_failed":
+    case "job_cancelled": {
+      const outcome = event.type.slice("job_".length);
+      const metricName = event.type === "job_completed" ? "JobsCompleted" : event.type === "job_failed" ? "JobsFailed" : "JobsCancelled";
+      return [
+        metric(metricName, 1, "Count"),
+        metric("JobDuration", event.durationMs, "Milliseconds", [
+          { Name: "Outcome", Value: outcome }
+        ])
+      ];
+    }
+    case "job_duplicate":
+      return [
+        metric("JobsDuplicate", 1, "Count", [
+          { Name: "DuplicateState", Value: event.state }
+        ])
+      ];
+    case "shutdown_timeout":
+      return [
+        metric("ShutdownTimeouts", 1, "Count"),
+        metric("ActiveJobsAtShutdown", event.activeJobs, "Count"),
+        metric("ShutdownTimeout", event.timeoutMs, "Milliseconds")
+      ];
+  }
+}
+var QueueCraftCloudWatchMetrics = class {
+  client;
+  namespace;
+  mappingOptions;
+  maxBatchSize;
+  flushIntervalMs;
+  onError;
+  pending = [];
+  timer;
+  activeFlush;
+  closed = false;
+  constructor(options) {
+    this.client = options.client;
+    this.namespace = options.namespace ?? DEFAULT_NAMESPACE;
+    this.maxBatchSize = options.maxBatchSize ?? DEFAULT_BATCH_SIZE;
+    this.flushIntervalMs = options.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
+    this.onError = options.onError;
+    this.mappingOptions = {
+      dimensions: options.dimensions,
+      now: options.now
+    };
+    this.validateOptions(options.dimensions);
+  }
+  /** Synchronous, failure-isolated observer for `QueueCraftPoller.onEvent`. */
+  onEvent = (event) => {
+    if (this.closed) return;
+    try {
+      this.pending.push(
+        ...mapQueueCraftEventToCloudWatchMetrics(event, this.mappingOptions)
+      );
+      if (this.pending.length >= this.maxBatchSize) {
+        this.clearTimer();
+        void this.flush().catch((error) => this.reportError(error));
+      } else {
+        this.scheduleFlush();
+      }
+    } catch (error) {
+      this.reportError(error);
+    }
+  };
+  /** Sends all currently buffered metrics. Failed batches stay queued for retry. */
+  async flush() {
+    if (this.activeFlush) {
+      await this.activeFlush;
+      return;
+    }
+    this.clearTimer();
+    const operation = this.flushPending();
+    this.activeFlush = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.activeFlush === operation) {
+        this.activeFlush = void 0;
+      }
+      if (!this.closed && this.pending.length > 0) {
+        this.scheduleFlush();
+      }
+    }
+  }
+  /** Stops the timer and flushes remaining metrics. */
+  async close() {
+    this.closed = true;
+    this.clearTimer();
+    await this.flush();
+  }
+  get pendingMetricCount() {
+    return this.pending.length;
+  }
+  async flushPending() {
+    while (this.pending.length > 0) {
+      const batch = this.pending.splice(0, this.maxBatchSize);
+      try {
+        await this.client.send(
+          new PutMetricDataCommand({
+            Namespace: this.namespace,
+            MetricData: batch
+          })
+        );
+      } catch (error) {
+        this.pending.unshift(...batch);
+        throw error;
+      }
+    }
+  }
+  scheduleFlush() {
+    if (this.timer || this.flushIntervalMs === 0 || this.closed) return;
+    this.timer = setTimeout(() => {
+      this.timer = void 0;
+      void this.flush().catch((error) => this.reportError(error));
+    }, this.flushIntervalMs);
+    this.timer.unref?.();
+  }
+  clearTimer() {
+    if (!this.timer) return;
+    clearTimeout(this.timer);
+    this.timer = void 0;
+  }
+  reportError(error) {
+    try {
+      this.onError?.(error);
+    } catch {
+    }
+  }
+  validateOptions(dimensions) {
+    if (!this.namespace.trim() || this.namespace.startsWith("AWS/")) {
+      throw new RangeError(
+        "namespace must be non-empty and must not start with the reserved AWS/ prefix."
+      );
+    }
+    if (!Number.isInteger(this.maxBatchSize) || this.maxBatchSize < 1 || this.maxBatchSize > MAX_METRICS_PER_REQUEST) {
+      throw new RangeError("maxBatchSize must be an integer between 1 and 1000.");
+    }
+    if (!Number.isInteger(this.flushIntervalMs) || this.flushIntervalMs < 0) {
+      throw new RangeError("flushIntervalMs must be a non-negative integer.");
+    }
+    validateDimensions(dimensions);
+  }
+};
+function validateDimensions(dimensions) {
+  const entries = Object.entries(dimensions ?? {});
+  if (entries.length > MAX_USER_DIMENSIONS) {
+    throw new RangeError(
+      "dimensions can contain at most 29 entries so QueueCraft can add one bounded event dimension."
+    );
+  }
+  for (const [name, value] of entries) {
+    if (!name.trim() || !value.trim()) {
+      throw new RangeError("dimension names and values must be non-empty.");
+    }
+  }
+}
+function toDimensions(dimensions) {
+  return Object.entries(dimensions ?? {}).map(([Name, Value]) => ({
+    Name,
+    Value
+  }));
+}
+
+// src/tracing.ts
+var QueueCraftTracingObserver = class {
+  tracer;
+  spanName;
+  attributes;
+  onError;
+  active = /* @__PURE__ */ new Map();
+  closed = false;
+  constructor(options) {
+    this.tracer = options.tracer;
+    this.spanName = options.spanName ?? "queuecraft.job";
+    this.attributes = options.attributes ?? {};
+    this.onError = options.onError;
+    if (!this.spanName.trim()) {
+      throw new RangeError("spanName must be non-empty.");
+    }
+  }
+  /** Synchronous, failure-isolated observer for QueueCraft lifecycle events. */
+  onEvent = (event) => {
+    if (this.closed) return;
+    try {
+      switch (event.type) {
+        case "job_started":
+          this.startJob(event.idempotencyKey, event.attempt);
+          break;
+        case "job_completed":
+        case "job_failed":
+        case "job_cancelled":
+          this.finishJob(
+            event.idempotencyKey,
+            event.type.slice("job_".length),
+            event.attempt,
+            event.durationMs
+          );
+          break;
+        case "job_duplicate":
+          this.recordInstantSpan(`${this.spanName}.duplicate`, {
+            "queuecraft.duplicate_state": event.state
+          });
+          break;
+        case "shutdown_timeout":
+          this.recordInstantSpan(`${this.spanName}.shutdown_timeout`, {
+            "queuecraft.active_jobs": event.activeJobs,
+            "queuecraft.timeout_ms": event.timeoutMs
+          });
+          break;
+        case "messages_received":
+          break;
+      }
+    } catch (error) {
+      this.reportError(error);
+    }
+  };
+  /** Ends any spans that never received a terminal QueueCraft event. */
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    for (const { span } of this.active.values()) {
+      this.finishSpan(span, "observer_closed");
+    }
+    this.active.clear();
+  }
+  get activeSpanCount() {
+    return this.active.size;
+  }
+  startJob(idempotencyKey, attempt) {
+    const previous = this.active.get(idempotencyKey);
+    if (previous) {
+      this.finishSpan(previous.span, "superseded");
+    }
+    const span = this.tracer.startSpan(this.spanName, {
+      attributes: {
+        ...this.attributes,
+        "messaging.system": "aws.sqs",
+        "queuecraft.attempt": attempt
+      }
+    });
+    this.active.set(idempotencyKey, { span });
+  }
+  finishJob(idempotencyKey, outcome, attempt, durationMs) {
+    const active = this.active.get(idempotencyKey);
+    const span = active?.span ?? this.tracer.startSpan(this.spanName, {
+      attributes: {
+        ...this.attributes,
+        "messaging.system": "aws.sqs",
+        "queuecraft.attempt": attempt,
+        "queuecraft.late_start": true
+      }
+    });
+    this.active.delete(idempotencyKey);
+    this.finishSpan(span, outcome, durationMs);
+  }
+  recordInstantSpan(name, attributes) {
+    const span = this.tracer.startSpan(name, {
+      attributes: {
+        ...this.attributes,
+        "messaging.system": "aws.sqs",
+        ...attributes
+      }
+    });
+    this.finishSpan(span, "observed");
+  }
+  finishSpan(span, outcome, durationMs) {
+    try {
+      span.setAttribute("queuecraft.outcome", outcome);
+      if (durationMs !== void 0) {
+        span.setAttribute("queuecraft.duration_ms", durationMs);
+      }
+    } catch (error) {
+      this.reportError(error);
+    } finally {
+      try {
+        span.end();
+      } catch (error) {
+        this.reportError(error);
+      }
+    }
+  }
+  reportError(error) {
+    try {
+      this.onError?.(error);
+    } catch {
+    }
+  }
+};
 export {
   IDEMPOTENCY_ATTRIBUTE,
   IdempotencyStore,
   LeaseState,
+  QueueCraftCloudWatchMetrics,
   QueueCraftLambdaProcessor,
   QueueCraftPoller,
   QueueCraftPublisher,
+  QueueCraftTracingObserver,
   Semaphore,
-  createQueueCraftDashboard
+  createQueueCraftDashboard,
+  mapQueueCraftEventToCloudWatchMetrics
 };

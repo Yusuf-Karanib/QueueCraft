@@ -31,13 +31,15 @@ Implemented:
 - Guarded integration runner verified against real SQS and DynamoDB
 - Automated isolated AWS integration tests with short-lived GitHub OIDC credentials
 - Structured, payload-free lifecycle events for logs and metrics
+- Buffered CloudWatch application metrics with bounded dimensions
+- OpenTelemetry-compatible lifecycle tracing without payload attributes
 - Loopback-only queue dashboard with privacy-redacted DLQ replay
 - Automated checks for Node.js 20 and 22
 - Public npm package: `@yusufkaranib/queuecraft`
 
 Not implemented yet:
 
-- CloudWatch metric mappings and tracing adapters
+- Automatic trace-context propagation into application handlers and outbound calls
 
 ## Why SQS?
 
@@ -138,6 +140,38 @@ are cancelled and the worker stops extending message visibility. A handler
 that ignores its signal may keep running in application code, but `stop()` will
 not wait forever and the DynamoDB lease can eventually expire.
 
+## CloudWatch metrics and tracing
+
+QueueCraft can turn the same payload-free lifecycle events into CloudWatch
+metrics and OpenTelemetry-compatible spans:
+
+> These APIs are currently on `main` and are planned for the next minor npm
+> release.
+
+```ts
+import { CloudWatchClient } from "@aws-sdk/client-cloudwatch";
+import {
+  QueueCraftCloudWatchMetrics,
+  QueueCraftTracingObserver,
+} from "@yusufkaranib/queuecraft";
+
+const metrics = new QueueCraftCloudWatchMetrics({
+  client: new CloudWatchClient({ region: process.env.AWS_REGION }),
+  namespace: "queuecraft/dev",
+  dimensions: { Service: "booking-worker" },
+});
+const tracing = new QueueCraftTracingObserver({ tracer });
+
+const onEvent = (event) => {
+  metrics.onEvent(event);
+  tracing.onEvent(event);
+};
+```
+
+Pass `onEvent` to either the poller or Lambda processor. During shutdown, call
+`await metrics.close()` and `tracing.close()`. Full setup and privacy limits are
+in [`docs/observability.md`](docs/observability.md).
+
 ## DynamoDB table requirement
 
 The idempotency table uses a String partition key named `messageId`. DynamoDB
@@ -191,7 +225,7 @@ Release steps are documented in [`docs/releasing.md`](docs/releasing.md).
 
 ## Roadmap
 
-1. Add CloudWatch metric mappings and tracing adapters.
+1. Add trace-context propagation and a sample CloudWatch dashboard.
 2. Gather feedback from controlled pilots using the public alpha.
 3. Publish future versions through npm trusted publishing with provenance.
 

@@ -217,6 +217,13 @@ Resources:
               - dynamodb:GetItem
               - dynamodb:UpdateItem
             Resource: !GetAtt IdempotencyTable.Arn
+          - Sid: PublishQueueCraftMetrics
+            Effect: Allow
+            Action: cloudwatch:PutMetricData
+            Resource: "*"
+            Condition:
+              StringEquals:
+                cloudwatch:namespace: !Sub "${ProjectName}/${Environment}"
 
   DashboardPolicy:
     Type: AWS::IAM::ManagedPolicy
@@ -276,6 +283,10 @@ Outputs:
   IdempotencyTableName:
     Description: Pass this table name to IdempotencyStore in the worker.
     Value: !Ref IdempotencyTable
+
+  MetricsNamespace:
+    Description: CloudWatch namespace allowed by the worker policy.
+    Value: !Sub "${ProjectName}/${Environment}"
 
   ProducerPolicyArn:
     Description: Attach this policy only to the YallaQueue publisher identity.

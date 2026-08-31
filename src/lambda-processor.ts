@@ -1,7 +1,7 @@
 import type { Message } from "@aws-sdk/client-sqs";
 import { randomUUID } from "node:crypto";
 import type { ExecutionLease, IdempotencyStore } from "./idempotency";
-import type { JobContext, JobHandler } from "./poller";
+import type { JobContext, JobHandler, QueueCraftEvent } from "./poller";
 import { IDEMPOTENCY_ATTRIBUTE } from "./publisher";
 import { Semaphore } from "./semaphore";
 
@@ -39,6 +39,7 @@ export interface QueueCraftLambdaProcessorOptions {
   readonly concurrency?: number;
   readonly idempotencyAttribute?: string;
   readonly onError?: (error: unknown, record?: LambdaSqsRecord) => void;
+  readonly onEvent?: (event: QueueCraftEvent) => void;
 }
 
 export interface LambdaProcessOptions {
@@ -59,6 +60,7 @@ export class QueueCraftLambdaProcessor {
     error: unknown,
     record?: LambdaSqsRecord,
   ) => void;
+  private readonly onEvent?: (event: QueueCraftEvent) => void;
 
   constructor(options: QueueCraftLambdaProcessorOptions) {
     const concurrency = options.concurrency ?? 10;
@@ -68,6 +70,7 @@ export class QueueCraftLambdaProcessor {
     this.idempotencyAttribute =
       options.idempotencyAttribute ?? IDEMPOTENCY_ATTRIBUTE;
     this.onError = options.onError;
+    this.onEvent = options.onEvent;
   }
 
   async process(
@@ -75,6 +78,12 @@ export class QueueCraftLambdaProcessor {
     options: LambdaProcessOptions = {},
   ): Promise<LambdaSqsBatchResponse> {
     const signal = options.signal ?? new AbortController().signal;
+    if (event.Records.length > 0) {
+      this.reportEvent({
+        type: "messages_received",
+        count: event.Records.length,
+      });
+    }
     const results = await Promise.all(
       event.Records.map((record) =>
         this.semaphore.run(() => this.processRecord(record, signal)),
@@ -112,21 +121,34 @@ export class QueueCraftLambdaProcessor {
     }
 
     if (acquisition.status === "completed") {
+      this.reportEvent({
+        type: "job_duplicate",
+        idempotencyKey,
+        state: "completed",
+      });
       return true;
     }
 
     if (acquisition.status !== "acquired") {
+      this.reportEvent({
+        type: "job_duplicate",
+        idempotencyKey,
+        state: acquisition.status,
+      });
       return false;
     }
 
     const lease = acquisition.lease;
     let handlerReturned = false;
+    const attempt = this.receiveCount(record);
+    const startedAt = Date.now();
+    this.reportEvent({ type: "job_started", idempotencyKey, attempt });
 
     try {
       const message = this.toSdkMessage(record);
       const context: JobContext = {
         idempotencyKey,
-        attempt: this.receiveCount(record),
+        attempt,
         signal,
       };
 
@@ -138,11 +160,23 @@ export class QueueCraftLambdaProcessor {
       }
 
       await this.idempotency.markComplete(lease);
+      this.reportEvent({
+        type: "job_completed",
+        idempotencyKey,
+        attempt,
+        durationMs: Date.now() - startedAt,
+      });
       return true;
     } catch (error) {
       if (!handlerReturned) {
         await this.safeRelease(lease, record);
       }
+      this.reportEvent({
+        type: signal.aborted ? "job_cancelled" : "job_failed",
+        idempotencyKey,
+        attempt,
+        durationMs: Date.now() - startedAt,
+      });
       this.reportError(error, record);
       return false;
     }
@@ -192,6 +226,14 @@ export class QueueCraftLambdaProcessor {
   private reportError(error: unknown, record?: LambdaSqsRecord): void {
     try {
       this.onError?.(error, record);
+    } catch {
+      // Observability callbacks must never fail a Lambda batch.
+    }
+  }
+
+  private reportEvent(event: QueueCraftEvent): void {
+    try {
+      this.onEvent?.(event);
     } catch {
       // Observability callbacks must never fail a Lambda batch.
     }

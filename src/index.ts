@@ -77,3 +77,26 @@ export type {
   QueueCraftDashboard,
   QueueCraftDashboardOptions,
 } from "./dashboard";
+
+// CloudWatch application metrics
+export {
+  mapQueueCraftEventToCloudWatchMetrics,
+  QueueCraftCloudWatchMetrics,
+} from "./cloudwatch-metrics";
+
+export type {
+  QueueCraftCloudWatchClient,
+  QueueCraftCloudWatchMetricMappingOptions,
+  QueueCraftCloudWatchMetricsOptions,
+} from "./cloudwatch-metrics";
+
+// Vendor-neutral tracing adapter (structurally compatible with OpenTelemetry)
+export { QueueCraftTracingObserver } from "./tracing";
+
+export type {
+  QueueCraftSpanAttributes,
+  QueueCraftSpanAttributeValue,
+  QueueCraftTraceSpan,
+  QueueCraftTracer,
+  QueueCraftTracingObserverOptions,
+} from "./tracing";

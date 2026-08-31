@@ -28,6 +28,7 @@ function harness(status: "acquired" | "completed" | "in_progress" = "acquired") 
   const releaseLock = vi.fn().mockResolvedValue(undefined);
   const handler = vi.fn().mockResolvedValue(undefined);
   const onError = vi.fn();
+  const onEvent = vi.fn();
   const idempotency = {
     acquireLock,
     markComplete,
@@ -38,6 +39,7 @@ function harness(status: "acquired" | "completed" | "in_progress" = "acquired") 
     handler,
     concurrency: 2,
     onError,
+    onEvent,
   });
 
   return {
@@ -47,6 +49,7 @@ function harness(status: "acquired" | "completed" | "in_progress" = "acquired") 
     releaseLock,
     handler,
     onError,
+    onEvent,
   };
 }
 
@@ -72,6 +75,11 @@ describe("QueueCraftLambdaProcessor", () => {
     );
     expect(test.markComplete).toHaveBeenCalledWith(lease);
     expect(test.releaseLock).not.toHaveBeenCalled();
+    expect(test.onEvent.mock.calls.map((call) => call[0].type)).toEqual([
+      "messages_received",
+      "job_started",
+      "job_completed",
+    ]);
   });
 
   it("acknowledges an already completed duplicate", async () => {
@@ -81,6 +89,11 @@ describe("QueueCraftLambdaProcessor", () => {
       batchItemFailures: [],
     });
     expect(test.handler).not.toHaveBeenCalled();
+    expect(test.onEvent).toHaveBeenCalledWith({
+      type: "job_duplicate",
+      idempotencyKey: "meta-message-1",
+      state: "completed",
+    });
   });
 
   it("returns an in-progress duplicate for a later retry", async () => {
@@ -110,6 +123,13 @@ describe("QueueCraftLambdaProcessor", () => {
       expect.objectContaining({ message: "booking failed" }),
       expect.objectContaining({ messageId: "failed-message" }),
     );
+    expect(test.onEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "job_failed",
+        idempotencyKey: "meta-message-1",
+        attempt: 2,
+      }),
+    );
   });
 
   it("does not start work after the invocation aborts", async () => {
@@ -126,5 +146,17 @@ describe("QueueCraftLambdaProcessor", () => {
       batchItemFailures: [{ itemIdentifier: "sqs-message-1" }],
     });
     expect(test.acquireLock).not.toHaveBeenCalled();
+  });
+
+  it("does not let a failing event observer fail a Lambda batch", async () => {
+    const test = harness();
+    test.onEvent.mockImplementation(() => {
+      throw new Error("observer failed");
+    });
+
+    await expect(test.processor.process({ Records: [record()] })).resolves.toEqual({
+      batchItemFailures: [],
+    });
+    expect(test.handler).toHaveBeenCalledOnce();
   });
 });

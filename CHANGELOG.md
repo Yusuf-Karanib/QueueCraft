@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Added buffered CloudWatch lifecycle metrics with bounded, privacy-safe
+  dimensions.
+- Added an OpenTelemetry-compatible tracing observer that does not export job
+  payloads or idempotency keys.
+- Added lifecycle events to the Lambda SQS processor so poller and Lambda
+  deployments share the same observability adapters.
+- Restricted the generated worker policy to publishing metrics only in its
+  QueueCraft CloudWatch namespace.
+
 ## 0.1.1 — 2026-08-31
 
 - Corrected the public installation and release documentation after verifying
