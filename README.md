@@ -174,6 +174,7 @@ keeps AWS credentials on the server, and redacts likely customer fields.
 ![QueueCraft local dashboard](docs/assets/dashboard.png)
 
 See [`docs/dashboard.md`](docs/dashboard.md) for setup and safety limits.
+Release steps are documented in [`docs/releasing.md`](docs/releasing.md).
 
 ## Roadmap
 
