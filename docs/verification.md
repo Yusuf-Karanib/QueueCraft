@@ -40,3 +40,20 @@ Verified behavior:
 
 Search indexing is not used as release proof because npm documents that newly
 published packages may take time to appear in search results.
+
+## 2026-08-31 — trusted npm release
+
+Source commit and tag: `3efa71b` / `v0.1.1`
+
+GitHub Actions run:
+[`33387393130`](https://github.com/Yusuf-Karanib/QueueCraft/actions/runs/33387393130)
+
+Verified behavior:
+
+- PASS: the version tag matched `package.json`;
+- PASS: GitHub Actions completed tests, type checking, building, and publishing;
+- PASS: npm accepted GitHub's short-lived OIDC identity without a stored npm
+  token;
+- PASS: a second clean, anonymous install downloaded version `0.1.1`;
+- PASS: the installed public API, dashboard command, and corrected README were
+  present.

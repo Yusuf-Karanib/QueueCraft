@@ -12,14 +12,11 @@ package is public.
 
 The first version had to exist before npm could attach a trusted publisher.
 
-## One-time trusted-publisher setup
+## Trusted publisher
 
-Run this while signed in to the `yusufkaranib` npm account with two-factor
-authentication enabled:
-
-```powershell
-npm trust github @yusufkaranib/queuecraft --file publish.yml --repo Yusuf-Karanib/QueueCraft --allow-publish -y
-```
+The package trusts GitHub Actions from `Yusuf-Karanib/QueueCraft`, using
+`.github/workflows/publish.yml`, for `npm publish`. Version `0.1.1` was the first
+release published through this connection.
 
 Do not paste an npm token into this repository or a chat.
 
