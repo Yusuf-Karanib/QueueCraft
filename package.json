@@ -12,12 +12,16 @@
       "default": "./dist/index.js"
     }
   },
+  "bin": {
+    "queuecraft-dashboard": "./dist/dashboard-cli.js"
+  },
   "files": [
     "dist",
     "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts --clean --target node20",
+    "build": "tsup src/index.ts src/dashboard-cli.ts --format esm --dts --clean --target node20",
+    "dashboard:demo": "npm run build && node scripts/dashboard-demo.mjs",
     "prepublishOnly": "npm run build",
     "test": "vitest run",
     "test:aws": "npm run build && node scripts/aws-integration.mjs",

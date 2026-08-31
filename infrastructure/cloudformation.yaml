@@ -218,6 +218,33 @@ Resources:
               - dynamodb:UpdateItem
             Resource: !GetAtt IdempotencyTable.Arn
 
+  DashboardPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${ProjectName}-${Environment}-dashboard"
+      Description: Minimum permissions required by the local QueueCraft dashboard.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ReadQueueHealth
+            Effect: Allow
+            Action:
+              - sqs:GetQueueAttributes
+            Resource:
+              - !GetAtt JobQueue.Arn
+              - !GetAtt DeadLetterQueue.Arn
+          - Sid: InspectAndRemoveDeadLetters
+            Effect: Allow
+            Action:
+              - sqs:DeleteMessage
+              - sqs:ReceiveMessage
+            Resource: !GetAtt DeadLetterQueue.Arn
+          - Sid: ReplayJobs
+            Effect: Allow
+            Action:
+              - sqs:SendMessage
+            Resource: !GetAtt JobQueue.Arn
+
 Outputs:
   AwsRegion:
     Description: Region selected when this stack was created.
@@ -257,3 +284,7 @@ Outputs:
   ConsumerPolicyArn:
     Description: Attach this policy only to the worker identity.
     Value: !Ref ConsumerPolicy
+
+  DashboardPolicyArn:
+    Description: Attach this policy only to the local dashboard identity.
+    Value: !Ref DashboardPolicy

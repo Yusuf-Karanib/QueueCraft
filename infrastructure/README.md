@@ -7,6 +7,7 @@ The CloudFormation template creates the first real QueueCraft environment:
 - One DynamoDB table for execution leases
 - One publisher IAM policy
 - One worker IAM policy
+- One local dashboard IAM policy
 - One dead-letter queue alarm
 - One alarm for jobs that remain unfinished for more than five minutes
 - An optional encrypted SNS topic and email subscription for that alarm
@@ -40,6 +41,7 @@ The important outputs are:
 - `IdempotencyTableName`
 - `ProducerPolicyArn`
 - `ConsumerPolicyArn`
+- `DashboardPolicyArn`
 - `DeadLetterAlarmName`
 - `JobQueueAgeAlarmName`
 - `AlarmTopicArn` when an alarm email was provided

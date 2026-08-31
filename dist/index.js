@@ -1,3 +1,7 @@
+import {
+  createQueueCraftDashboard
+} from "./chunk-AGN4MPTV.js";
+
 // src/publisher.ts
 import {
   SendMessageCommand
@@ -883,5 +887,6 @@ export {
   QueueCraftLambdaProcessor,
   QueueCraftPoller,
   QueueCraftPublisher,
-  Semaphore
+  Semaphore,
+  createQueueCraftDashboard
 };

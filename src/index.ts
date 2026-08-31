@@ -69,3 +69,11 @@ export type {
   QueueCraftConfig,
   WorkerOptions,
 } from "./types";
+
+// Local operations dashboard
+export { createQueueCraftDashboard } from "./dashboard";
+
+export type {
+  QueueCraftDashboard,
+  QueueCraftDashboardOptions,
+} from "./dashboard";

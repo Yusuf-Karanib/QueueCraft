@@ -419,4 +419,21 @@ declare class QueueCraftLambdaProcessor {
     private reportError;
 }
 
-export { type AcquireLockResult, type EpochMillis, type ExecutionLease, IDEMPOTENCY_ATTRIBUTE, IdempotencyStore, type IdempotencyStoreOptions, type Job, type JobContext, type JobHandler, type JobStatus, type LambdaBatchItemFailure, type LambdaProcessOptions, type LambdaSqsBatchResponse, type LambdaSqsEvent, type LambdaSqsMessageAttribute, type LambdaSqsRecord, LeaseState, type PublishOptions, type PublishResult, type QueueCraftConfig, type QueueCraftEvent, QueueCraftLambdaProcessor, type QueueCraftLambdaProcessorOptions, QueueCraftPoller, type QueueCraftPollerOptions, QueueCraftPublisher, type QueueCraftPublisherOptions, Semaphore, type WorkerOptions };
+interface QueueCraftDashboardOptions {
+    readonly sqsClient: SQSClient;
+    readonly queueUrl: string;
+    readonly dlqUrl: string;
+    readonly host?: string;
+    readonly port?: number;
+    readonly title?: string;
+    readonly replayCacheTtlMs?: number;
+    /** Receives server-side failures without exposing AWS details to the page. */
+    readonly onError?: (error: unknown) => void;
+}
+interface QueueCraftDashboard {
+    readonly url: string;
+    close(): Promise<void>;
+}
+declare function createQueueCraftDashboard(options: QueueCraftDashboardOptions): Promise<QueueCraftDashboard>;
+
+export { type AcquireLockResult, type EpochMillis, type ExecutionLease, IDEMPOTENCY_ATTRIBUTE, IdempotencyStore, type IdempotencyStoreOptions, type Job, type JobContext, type JobHandler, type JobStatus, type LambdaBatchItemFailure, type LambdaProcessOptions, type LambdaSqsBatchResponse, type LambdaSqsEvent, type LambdaSqsMessageAttribute, type LambdaSqsRecord, LeaseState, type PublishOptions, type PublishResult, type QueueCraftConfig, type QueueCraftDashboard, type QueueCraftDashboardOptions, type QueueCraftEvent, QueueCraftLambdaProcessor, type QueueCraftLambdaProcessorOptions, QueueCraftPoller, type QueueCraftPollerOptions, QueueCraftPublisher, type QueueCraftPublisherOptions, Semaphore, type WorkerOptions, createQueueCraftDashboard };

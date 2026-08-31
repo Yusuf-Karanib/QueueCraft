@@ -10,5 +10,6 @@ First public alpha:
 - visibility and lease heartbeats;
 - bounded concurrency and graceful shutdown;
 - structured worker lifecycle events;
+- loopback-only queue dashboard with privacy-redacted DLQ replay;
 - CloudFormation queue, DLQ, DynamoDB, IAM policies, and alarms;
 - unit tests, GitHub CI, and a verified real-AWS integration runner.

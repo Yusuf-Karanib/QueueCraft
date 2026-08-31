@@ -26,13 +26,13 @@ Implemented:
 - CloudFormation for a standard queue, DLQ, DynamoDB table, IAM policies, and alarms
 - Guarded integration runner verified against real SQS and DynamoDB
 - Structured, payload-free lifecycle events for logs and metrics
+- Loopback-only queue dashboard with privacy-redacted DLQ replay
 - Automated checks for Node.js 20 and 22
 
 Not implemented yet:
 
 - Automated creation and cleanup of temporary AWS integration resources in CI
 - CloudWatch metric mappings and tracing adapters
-- A local queue and DLQ dashboard
 - First npm alpha publication; `0.1.0` is prepared but account 2FA is required
 
 ## Why SQS?
@@ -165,13 +165,22 @@ suggested metrics. See
 [`docs/yallaqueue-reference.md`](docs/yallaqueue-reference.md) for the first
 end-to-end application built on QueueCraft.
 
+## Local dashboard
+
+The dashboard shows ready, in-flight, and dead-letter counts. It can replay a
+failed standard-queue job only after a confirmation. It binds to your computer,
+keeps AWS credentials on the server, and redacts likely customer fields.
+
+![QueueCraft local dashboard](docs/assets/dashboard.png)
+
+See [`docs/dashboard.md`](docs/dashboard.md) for setup and safety limits.
+
 ## Roadmap
 
 1. Automate the guarded AWS test with temporary resources and short-lived credentials.
 2. Add CloudWatch metric mappings and tracing adapters.
-3. Add a small local dashboard for queue health and safe DLQ replay.
-4. Publish `@yusufkaranib/queuecraft@0.1.0`, tag it, and gather pilot feedback.
-5. Document YallaQueue as the end-to-end reference architecture.
+3. Publish `@yusufkaranib/queuecraft@0.1.0`, tag it, and gather pilot feedback.
+4. Automate package releases with npm trusted publishing and provenance.
 
 ## License
 
