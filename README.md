@@ -25,12 +25,13 @@ Implemented:
 - Bounded graceful shutdown with handler cancellation
 - CloudFormation for a standard queue, DLQ, DynamoDB table, IAM policies, and alarms
 - Guarded integration runner verified against real SQS and DynamoDB
+- Structured, payload-free lifecycle events for logs and metrics
 - Automated checks for Node.js 20 and 22
 
 Not implemented yet:
 
 - Automated creation and cleanup of temporary AWS integration resources in CI
-- Structured logs, custom metrics, and tracing
+- CloudWatch metric mappings and tracing adapters
 - A local queue and DLQ dashboard
 - A published npm package
 
@@ -115,6 +116,7 @@ const poller = new QueueCraftPoller({
     await processJob(job, context.signal);
   },
   onError: (error) => console.error(error),
+  onEvent: (event) => console.log(JSON.stringify(event)),
 });
 
 await poller.start();
@@ -163,7 +165,7 @@ policies, and CloudWatch alarms.
 ## Roadmap
 
 1. Automate the guarded AWS test with temporary resources and short-lived credentials.
-2. Add structured logs, CloudWatch metrics, and tracing hooks.
+2. Add CloudWatch metric mappings and tracing adapters.
 3. Add a small local dashboard for queue health and safe DLQ replay.
 4. Publish under an npm scope and create a tagged alpha release.
 5. Document YallaQueue as the end-to-end reference architecture.

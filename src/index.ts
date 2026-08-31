@@ -29,6 +29,7 @@ export { QueueCraftPoller } from "./poller";
 export type {
   JobContext,
   QueueCraftPollerOptions,
+  QueueCraftEvent,
   JobHandler,
 } from "./poller";
 

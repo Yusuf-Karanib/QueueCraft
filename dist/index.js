@@ -73,6 +73,7 @@ var QueueCraftPoller = class {
   queueUrl;
   handler;
   onError;
+  onEvent;
   idempotencyAttribute;
   maxConcurrency;
   pollIntervalMs;
@@ -95,6 +96,7 @@ var QueueCraftPoller = class {
     this.queueUrl = options.queueUrl;
     this.handler = options.handler;
     this.onError = options.onError;
+    this.onEvent = options.onEvent;
     this.idempotencyAttribute = options.idempotencyAttribute ?? IDEMPOTENCY_ATTRIBUTE;
     this.maxConcurrency = options.worker.concurrency;
     this.pollIntervalMs = options.worker.pollIntervalMs;
@@ -127,6 +129,9 @@ var QueueCraftPoller = class {
       let messages;
       try {
         messages = await this.receive(capacity);
+        if (messages.length > 0) {
+          this.reportEvent({ type: "messages_received", count: messages.length });
+        }
       } catch (err) {
         if (!this.running) break;
         this.reportError(err);
@@ -215,10 +220,20 @@ var QueueCraftPoller = class {
       ownerId
     );
     if (acquisition.status === "completed") {
+      this.reportEvent({
+        type: "job_duplicate",
+        idempotencyKey,
+        state: "completed"
+      });
       await this.deleteMessage(receiptHandle);
       return;
     }
     if (acquisition.status !== "acquired") {
+      this.reportEvent({
+        type: "job_duplicate",
+        idempotencyKey,
+        state: acquisition.status
+      });
       return;
     }
     const lease = acquisition.lease;
@@ -236,6 +251,8 @@ var QueueCraftPoller = class {
       this.reportError(error, message);
     });
     const attempt = this.receiveCount(message);
+    const startedAt = Date.now();
+    this.reportEvent({ type: "job_started", idempotencyKey, attempt });
     let handlerError;
     try {
       await this.handler(message, {
@@ -251,15 +268,33 @@ var QueueCraftPoller = class {
       this.activeExecutions.delete(handlerController);
     }
     if (heartbeatError !== void 0) {
+      this.reportEvent({
+        type: "job_cancelled",
+        idempotencyKey,
+        attempt,
+        durationMs: Date.now() - startedAt
+      });
       return;
     }
     if (handlerError !== void 0) {
       await this.safeRelease(lease);
+      this.reportEvent({
+        type: "job_failed",
+        idempotencyKey,
+        attempt,
+        durationMs: Date.now() - startedAt
+      });
       this.reportError(handlerError, message);
       return;
     }
     if (handlerController.signal.aborted) {
       await this.safeRelease(lease);
+      this.reportEvent({
+        type: "job_cancelled",
+        idempotencyKey,
+        attempt,
+        durationMs: Date.now() - startedAt
+      });
       this.reportError(
         handlerController.signal.reason ?? new Error("QueueCraft handler cancelled during shutdown."),
         message
@@ -269,6 +304,12 @@ var QueueCraftPoller = class {
     try {
       await this.idempotency.markComplete(lease);
       await this.deleteMessage(receiptHandle);
+      this.reportEvent({
+        type: "job_completed",
+        idempotencyKey,
+        attempt,
+        durationMs: Date.now() - startedAt
+      });
     } catch (err) {
       this.reportError(err, message);
     }
@@ -379,6 +420,12 @@ var QueueCraftPoller = class {
     } catch {
     }
   }
+  reportEvent(event) {
+    try {
+      this.onEvent?.(event);
+    } catch {
+    }
+  }
   async drain() {
     await Promise.allSettled([...this.inflight]);
   }
@@ -393,6 +440,11 @@ var QueueCraftPoller = class {
     const reason = new Error(
       `QueueCraft graceful shutdown timed out after ${this.shutdownTimeoutMs}ms.`
     );
+    this.reportEvent({
+      type: "shutdown_timeout",
+      activeJobs: this.activeExecutions.size,
+      timeoutMs: this.shutdownTimeoutMs
+    });
     for (const [handlerController, heartbeatController] of this.activeExecutions) {
       heartbeatController.abort(reason);
       handlerController.abort(reason);

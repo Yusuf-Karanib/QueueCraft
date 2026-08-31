@@ -86,6 +86,7 @@ interface Harness {
   poller: QueueCraftPoller;
   handler: MockFunction;
   onError: MockFunction;
+  onEvent: MockFunction;
   sqsSend: MockFunction;
   dynamoSend: MockFunction;
   message: Message;
@@ -145,6 +146,7 @@ function createHarness(
   const dynamoClient = { send: dynamoSend } as unknown as DynamoDBClient;
   const handler = vi.fn(handlerImpl);
   const onError = vi.fn();
+  const onEvent = vi.fn();
   const worker: WorkerOptions = {
     concurrency: 5,
     pollIntervalMs: 5,
@@ -165,9 +167,10 @@ function createHarness(
     handler,
     worker,
     onError,
+    onEvent,
   });
 
-  return { poller, handler, onError, sqsSend, dynamoSend, message };
+  return { poller, handler, onError, onEvent, sqsSend, dynamoSend, message };
 }
 
 async function runOnce(poller: QueueCraftPoller): Promise<void> {
@@ -183,7 +186,7 @@ describe("QueueCraftPoller", () => {
   });
 
   it("uses the producer's stable idempotency key and completes the job", async () => {
-    const { poller, handler, sqsSend, dynamoSend, message } = createHarness(
+    const { poller, handler, onEvent, sqsSend, dynamoSend, message } = createHarness(
       async () => undefined,
     );
 
@@ -211,6 +214,19 @@ describe("QueueCraftPoller", () => {
     expect(acquireInput).toMatchObject({
       Key: { messageId: { S: STABLE_JOB_ID } },
     });
+    expect(onEvent.mock.calls.map((call) => call[0].type)).toEqual([
+      "messages_received",
+      "job_started",
+      "job_completed",
+    ]);
+    expect(onEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "job_completed",
+        idempotencyKey: STABLE_JOB_ID,
+        attempt: 2,
+        durationMs: expect.any(Number),
+      }),
+    );
   });
 
   it("acknowledges a completed duplicate without running the handler", async () => {
@@ -223,6 +239,18 @@ describe("QueueCraftPoller", () => {
 
     expect(handler).not.toHaveBeenCalled();
     expect(commandsOfType(sqsSend, "DeleteMessage")).toHaveLength(1);
+  });
+
+  it("does not let a failing event observer crash job processing", async () => {
+    const harness = createHarness(async () => undefined);
+    harness.onEvent.mockImplementation(() => {
+      throw new Error("observer failed");
+    });
+
+    await runOnce(harness.poller);
+
+    expect(harness.handler).toHaveBeenCalledTimes(1);
+    expect(commandsOfType(harness.sqsSend, "DeleteMessage")).toHaveLength(1);
   });
 
   it("leaves an in-progress duplicate for its current owner", async () => {
@@ -310,6 +338,12 @@ describe("QueueCraftPoller", () => {
       expect.objectContaining({ message: "lease renewal failed" }),
       harness.message,
     );
+    expect(harness.onEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "job_cancelled",
+        idempotencyKey: STABLE_JOB_ID,
+      }),
+    );
   });
 
   it("returns messages received during shutdown without executing them", async () => {
@@ -357,6 +391,11 @@ describe("QueueCraftPoller", () => {
       }),
       harness.message,
     );
+    expect(harness.onEvent).toHaveBeenCalledWith({
+      type: "shutdown_timeout",
+      activeJobs: 1,
+      timeoutMs: 5,
+    });
   });
 
   it("rejects a negative graceful-shutdown timeout", () => {

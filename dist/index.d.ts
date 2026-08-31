@@ -263,6 +263,28 @@ interface JobContext {
     readonly signal: AbortSignal;
 }
 type JobHandler = (message: Message, context: JobContext) => Promise<void> | void;
+/** Structured, payload-free lifecycle events for logs and metrics. */
+type QueueCraftEvent = {
+    readonly type: "messages_received";
+    readonly count: number;
+} | {
+    readonly type: "job_started";
+    readonly idempotencyKey: string;
+    readonly attempt: number;
+} | {
+    readonly type: "job_completed" | "job_failed" | "job_cancelled";
+    readonly idempotencyKey: string;
+    readonly attempt: number;
+    readonly durationMs: number;
+} | {
+    readonly type: "job_duplicate";
+    readonly idempotencyKey: string;
+    readonly state: "completed" | "in_progress" | "failed";
+} | {
+    readonly type: "shutdown_timeout";
+    readonly activeJobs: number;
+    readonly timeoutMs: number;
+};
 interface QueueCraftPollerOptions {
     readonly sqsClient: SQSClient;
     readonly semaphore: Semaphore;
@@ -279,6 +301,8 @@ interface QueueCraftPollerOptions {
     readonly worker: WorkerOptions;
     /** Optional observer for handler/commit/receive errors. Never throws. */
     readonly onError?: (error: unknown, message?: Message) => void;
+    /** Optional observer for structured lifecycle events. Never throws. */
+    readonly onEvent?: (event: QueueCraftEvent) => void;
     /** Message attribute containing the stable application idempotency key. */
     readonly idempotencyAttribute?: string;
 }
@@ -289,6 +313,7 @@ declare class QueueCraftPoller {
     private readonly queueUrl;
     private readonly handler;
     private readonly onError?;
+    private readonly onEvent?;
     private readonly idempotencyAttribute;
     private readonly maxConcurrency;
     private readonly pollIntervalMs;
@@ -335,6 +360,7 @@ declare class QueueCraftPoller {
     private validateOptions;
     private assertIntegerInRange;
     private reportError;
+    private reportEvent;
     private drain;
     private shutdownAndDrain;
     private performBoundedDrain;
@@ -393,4 +419,4 @@ declare class QueueCraftLambdaProcessor {
     private reportError;
 }
 
-export { type AcquireLockResult, type EpochMillis, type ExecutionLease, IDEMPOTENCY_ATTRIBUTE, IdempotencyStore, type IdempotencyStoreOptions, type Job, type JobContext, type JobHandler, type JobStatus, type LambdaBatchItemFailure, type LambdaProcessOptions, type LambdaSqsBatchResponse, type LambdaSqsEvent, type LambdaSqsMessageAttribute, type LambdaSqsRecord, LeaseState, type PublishOptions, type PublishResult, type QueueCraftConfig, QueueCraftLambdaProcessor, type QueueCraftLambdaProcessorOptions, QueueCraftPoller, type QueueCraftPollerOptions, QueueCraftPublisher, type QueueCraftPublisherOptions, Semaphore, type WorkerOptions };
+export { type AcquireLockResult, type EpochMillis, type ExecutionLease, IDEMPOTENCY_ATTRIBUTE, IdempotencyStore, type IdempotencyStoreOptions, type Job, type JobContext, type JobHandler, type JobStatus, type LambdaBatchItemFailure, type LambdaProcessOptions, type LambdaSqsBatchResponse, type LambdaSqsEvent, type LambdaSqsMessageAttribute, type LambdaSqsRecord, LeaseState, type PublishOptions, type PublishResult, type QueueCraftConfig, type QueueCraftEvent, QueueCraftLambdaProcessor, type QueueCraftLambdaProcessorOptions, QueueCraftPoller, type QueueCraftPollerOptions, QueueCraftPublisher, type QueueCraftPublisherOptions, Semaphore, type WorkerOptions };

@@ -48,6 +48,31 @@ export type JobHandler = (
   context: JobContext,
 ) => Promise<void> | void;
 
+/** Structured, payload-free lifecycle events for logs and metrics. */
+export type QueueCraftEvent =
+  | { readonly type: "messages_received"; readonly count: number }
+  | {
+      readonly type: "job_started";
+      readonly idempotencyKey: string;
+      readonly attempt: number;
+    }
+  | {
+      readonly type: "job_completed" | "job_failed" | "job_cancelled";
+      readonly idempotencyKey: string;
+      readonly attempt: number;
+      readonly durationMs: number;
+    }
+  | {
+      readonly type: "job_duplicate";
+      readonly idempotencyKey: string;
+      readonly state: "completed" | "in_progress" | "failed";
+    }
+  | {
+      readonly type: "shutdown_timeout";
+      readonly activeJobs: number;
+      readonly timeoutMs: number;
+    };
+
 export interface QueueCraftPollerOptions {
   readonly sqsClient: SQSClient;
   readonly semaphore: Semaphore;
@@ -69,6 +94,9 @@ export interface QueueCraftPollerOptions {
   /** Optional observer for handler/commit/receive errors. Never throws. */
   readonly onError?: (error: unknown, message?: Message) => void;
 
+  /** Optional observer for structured lifecycle events. Never throws. */
+  readonly onEvent?: (event: QueueCraftEvent) => void;
+
   /** Message attribute containing the stable application idempotency key. */
   readonly idempotencyAttribute?: string;
 }
@@ -80,6 +108,7 @@ export class QueueCraftPoller {
   private readonly queueUrl: string;
   private readonly handler: JobHandler;
   private readonly onError?: (error: unknown, message?: Message) => void;
+  private readonly onEvent?: (event: QueueCraftEvent) => void;
   private readonly idempotencyAttribute: string;
 
   private readonly maxConcurrency: number;
@@ -108,6 +137,7 @@ export class QueueCraftPoller {
     this.queueUrl = options.queueUrl;
     this.handler = options.handler;
     this.onError = options.onError;
+    this.onEvent = options.onEvent;
     this.idempotencyAttribute =
       options.idempotencyAttribute ?? IDEMPOTENCY_ATTRIBUTE;
 
@@ -153,6 +183,9 @@ export class QueueCraftPoller {
       let messages: Message[];
       try {
         messages = await this.receive(capacity);
+        if (messages.length > 0) {
+          this.reportEvent({ type: "messages_received", count: messages.length });
+        }
       } catch (err) {
         if (!this.running) break; // long-poll aborted by stop()
         this.reportError(err);
@@ -263,6 +296,11 @@ export class QueueCraftPoller {
     );
 
     if (acquisition.status === "completed") {
+      this.reportEvent({
+        type: "job_duplicate",
+        idempotencyKey,
+        state: "completed",
+      });
       // The logical job already committed. Acknowledge this transport-level
       // duplicate so it does not circulate until the DLQ.
       await this.deleteMessage(receiptHandle);
@@ -270,6 +308,11 @@ export class QueueCraftPoller {
     }
 
     if (acquisition.status !== "acquired") {
+      this.reportEvent({
+        type: "job_duplicate",
+        idempotencyKey,
+        state: acquisition.status,
+      });
       // Another worker still owns it, or it is terminally failed. Do not delete
       // the message; queue redrive policy remains responsible for failures.
       return;
@@ -292,6 +335,8 @@ export class QueueCraftPoller {
     });
 
     const attempt = this.receiveCount(message);
+    const startedAt = Date.now();
+    this.reportEvent({ type: "job_started", idempotencyKey, attempt });
     let handlerError: unknown;
 
     try {
@@ -311,18 +356,36 @@ export class QueueCraftPoller {
     if (heartbeatError !== undefined) {
       // Ownership is uncertain. Never settle with a possibly stale receipt
       // handle or release a lease that another worker may now own.
+      this.reportEvent({
+        type: "job_cancelled",
+        idempotencyKey,
+        attempt,
+        durationMs: Date.now() - startedAt,
+      });
       return;
     }
 
     if (handlerError !== undefined) {
       // Drop the owned lease and leave the message for SQS retry/redrive.
       await this.safeRelease(lease);
+      this.reportEvent({
+        type: "job_failed",
+        idempotencyKey,
+        attempt,
+        durationMs: Date.now() - startedAt,
+      });
       this.reportError(handlerError, message);
       return;
     }
 
     if (handlerController.signal.aborted) {
       await this.safeRelease(lease);
+      this.reportEvent({
+        type: "job_cancelled",
+        idempotencyKey,
+        attempt,
+        durationMs: Date.now() - startedAt,
+      });
       this.reportError(
         handlerController.signal.reason ??
           new Error("QueueCraft handler cancelled during shutdown."),
@@ -337,6 +400,12 @@ export class QueueCraftPoller {
     try {
       await this.idempotency.markComplete(lease);
       await this.deleteMessage(receiptHandle);
+      this.reportEvent({
+        type: "job_completed",
+        idempotencyKey,
+        attempt,
+        durationMs: Date.now() - startedAt,
+      });
     } catch (err) {
       // Do not release the lease: the handler already returned successfully.
       // A retry can observe COMPLETED or take over only after an expired lease.
@@ -479,6 +548,14 @@ export class QueueCraftPoller {
     }
   }
 
+  private reportEvent(event: QueueCraftEvent): void {
+    try {
+      this.onEvent?.(event);
+    } catch {
+      // Observability callbacks must never crash the worker runtime.
+    }
+  }
+
   private async drain(): Promise<void> {
     await Promise.allSettled([...this.inflight]);
   }
@@ -497,6 +574,11 @@ export class QueueCraftPoller {
     const reason = new Error(
       `QueueCraft graceful shutdown timed out after ${this.shutdownTimeoutMs}ms.`,
     );
+    this.reportEvent({
+      type: "shutdown_timeout",
+      activeJobs: this.activeExecutions.size,
+      timeoutMs: this.shutdownTimeoutMs,
+    });
     for (const [handlerController, heartbeatController] of
       this.activeExecutions) {
       heartbeatController.abort(reason);
