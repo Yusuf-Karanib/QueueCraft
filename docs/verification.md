@@ -1,5 +1,29 @@
 # Verification record
 
+## 2026-09-01 — public observability release
+
+Source commit and tag: `6627e38` / `v0.2.0`
+
+GitHub Actions runs:
+
+- [CI `33438508220`](https://github.com/Yusuf-Karanib/QueueCraft/actions/runs/33438508220)
+- [AWS integration `33438507962`](https://github.com/Yusuf-Karanib/QueueCraft/actions/runs/33438507962)
+- [trusted npm publish `33439508069`](https://github.com/Yusuf-Karanib/QueueCraft/actions/runs/33439508069)
+
+Additional disposable AWS stack: `queuecraft-ci-20260901-20`
+
+Verified behavior:
+
+- PASS: the version-tag-only workflow published `0.2.0` through npm trusted
+  publishing without a stored npm token;
+- PASS: a clean anonymous install downloaded exactly version `0.2.0`;
+- PASS: the installed package exported the publisher, poller, CloudWatch metrics,
+  lifecycle tracing, and metric-mapping APIs;
+- PASS: the installed package included the local dashboard command;
+- PASS: both automated and manual disposable AWS tests covered real SQS
+  processing, DynamoDB duplicate suppression, retry, and DLQ redrive;
+- PASS: both disposable AWS stacks were deleted after verification.
+
 ## 2026-09-01 — CloudWatch metrics and tracing adapters
 
 Source commit: `ee04054`
