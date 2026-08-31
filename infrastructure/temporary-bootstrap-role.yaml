@@ -78,6 +78,14 @@ Resources:
                   - iam:UpdateAssumeRolePolicy
                   - iam:UpdateRoleDescription
                 Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/queuecraft-github-integration"
+              - Sid: ReadOwnBootstrapPermissions
+                Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListRolePolicies
+                Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${BootstrapRoleName}"
 
 Outputs:
   BootstrapRoleArn:
