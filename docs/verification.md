@@ -1,5 +1,26 @@
 # Verification record
 
+## 2026-08-31 — automated isolated AWS integration
+
+Source commit: `42c4744`
+
+GitHub Actions run:
+[`33414210743`](https://github.com/Yusuf-Karanib/QueueCraft/actions/runs/33414210743)
+
+Temporary stack: `queuecraft-ci-33414210743-1`
+
+Verified behavior:
+
+- PASS: GitHub exchanged its repository identity for short-lived AWS credentials;
+- PASS: the workflow created a unique SQS queue, DLQ, and DynamoDB table;
+- PASS: QueueCraft completed a real SQS job and suppressed a duplicate through DynamoDB;
+- PASS: an intentionally failed job was retried and moved to the real DLQ;
+- PASS: the cleanup step completed and AWS no longer reports the temporary stack;
+- PASS: the permanent role is limited to resources named `queuecraft-ci-*` and
+  cannot manage IAM or YallaQueue resources.
+
+No AWS access key is stored in GitHub.
+
 ## 2026-08-31 — real AWS integration
 
 Source commit: `3c8c6fa`
@@ -19,9 +40,8 @@ Verified behavior:
 The existing `queuecraft-production` and YallaQueue stacks were not used or
 changed by this test.
 
-This is a manually triggered verification record. The next step is to run the
-same guarded test from GitHub Actions using short-lived AWS credentials and an
-automatically removed test stack.
+This was the first manual verification. The same guarded test is now automated
+by the workflow recorded above.
 
 ## 2026-08-31 — public npm alpha
 

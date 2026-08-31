@@ -1,5 +1,9 @@
 # QueueCraft
 
+[![CI](https://github.com/Yusuf-Karanib/QueueCraft/actions/workflows/ci.yml/badge.svg)](https://github.com/Yusuf-Karanib/QueueCraft/actions/workflows/ci.yml)
+[![AWS integration](https://github.com/Yusuf-Karanib/QueueCraft/actions/workflows/aws-integration.yml/badge.svg)](https://github.com/Yusuf-Karanib/QueueCraft/actions/workflows/aws-integration.yml)
+[![npm](https://img.shields.io/npm/v/%40yusufkaranib%2Fqueuecraft)](https://www.npmjs.com/package/@yusufkaranib/queuecraft)
+
 QueueCraft is a TypeScript toolkit for moving slow or failure-prone work out of
 web requests and into AWS SQS. It supplies the queue plumbing so an application
 can publish a job, process it with bounded concurrency, retry failures, and
@@ -25,6 +29,7 @@ Implemented:
 - Bounded graceful shutdown with handler cancellation
 - CloudFormation for a standard queue, DLQ, DynamoDB table, IAM policies, and alarms
 - Guarded integration runner verified against real SQS and DynamoDB
+- Automated isolated AWS integration tests with short-lived GitHub OIDC credentials
 - Structured, payload-free lifecycle events for logs and metrics
 - Loopback-only queue dashboard with privacy-redacted DLQ replay
 - Automated checks for Node.js 20 and 22
@@ -32,7 +37,6 @@ Implemented:
 
 Not implemented yet:
 
-- Automated creation and cleanup of temporary AWS integration resources in CI
 - CloudWatch metric mappings and tracing adapters
 
 ## Why SQS?
@@ -61,7 +65,7 @@ messages to the DLQ.
 npm install @yusufkaranib/queuecraft
 ```
 
-Version `0.1.0` is the first public alpha. Pin the version for controlled pilots
+Version `0.1.1` is the current public alpha. Pin the version for controlled pilots
 and review the changelog before upgrading.
 
 ## Publishing a job
@@ -158,8 +162,9 @@ A guarded real-AWS test runner is included in
 [`docs/aws-integration-test.md`](docs/aws-integration-test.md). It must be run
 against a dedicated test stack; it deliberately refuses to use a non-empty
 queue. Its first passing AWS run is recorded in
-[`docs/verification.md`](docs/verification.md). Until this test is automated in
-CI and repeated regularly, the project status remains alpha.
+[`docs/verification.md`](docs/verification.md). GitHub Actions now creates an
+isolated stack, runs the guarded test, and deletes the stack on relevant changes
+to `main`. The project remains alpha until it has evidence from controlled pilots.
 
 ## Deploy the AWS resources
 
@@ -186,10 +191,9 @@ Release steps are documented in [`docs/releasing.md`](docs/releasing.md).
 
 ## Roadmap
 
-1. Automate the guarded AWS test with temporary resources and short-lived credentials.
-2. Add CloudWatch metric mappings and tracing adapters.
-3. Gather feedback from controlled pilots using the public alpha.
-4. Publish future versions through npm trusted publishing with provenance.
+1. Add CloudWatch metric mappings and tracing adapters.
+2. Gather feedback from controlled pilots using the public alpha.
+3. Publish future versions through npm trusted publishing with provenance.
 
 ## License
 

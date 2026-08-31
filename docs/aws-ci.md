@@ -34,12 +34,9 @@ Creating this trust is an account-security change. Use a temporary
 administrator session for the bootstrap only. Do not use AWS root credentials
 for normal QueueCraft work.
 
-When a standalone account has no non-root administrator,
-`infrastructure/temporary-bootstrap-role.yaml` can create a temporary GitHub
-OIDC role. `.github/workflows/aws-bootstrap.yml` uses it once to create only the
-`queuecraft-github-trust` stack and `queuecraft-github-integration` role. Delete
-the bootstrap stack and workflow immediately afterward. The temporary role must
-never become a general-purpose deployment identity.
+After the trust stack exists, normal runs use only the
+`queuecraft-github-integration` role. It has no long-lived access key and cannot
+manage IAM resources.
 
 ## Per-run resources
 
@@ -54,5 +51,7 @@ The workflow builds and tests QueueCraft, runs the guarded test against those
 resources, and deletes the stack even when the test fails. The stack name uses
 the GitHub run and attempt IDs, so it cannot target YallaQueue's resources.
 
-The workflow starts manually until the first OIDC-backed run passes. After that
-proof, it can be limited to relevant changes on `main`.
+The workflow runs automatically when relevant code, tests, dependencies, or AWS
+test infrastructure change on `main`. It can also be started manually from the
+GitHub Actions page. The first passing OIDC-backed run is recorded in
+[`verification.md`](verification.md).
