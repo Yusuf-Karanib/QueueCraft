@@ -33,7 +33,7 @@ Not implemented yet:
 - Automated creation and cleanup of temporary AWS integration resources in CI
 - CloudWatch metric mappings and tracing adapters
 - A local queue and DLQ dashboard
-- A stable npm release beyond the first public alpha
+- First npm alpha publication; `0.1.0` is prepared but account 2FA is required
 
 ## Why SQS?
 
@@ -133,13 +133,8 @@ depend on immediate TTL deletion; lease takeover checks `leaseUntil` directly.
 
 ## Run locally
 
-Install the public alpha package:
-
-```bash
-npm install @yusufkaranib/queuecraft
-```
-
-To work on QueueCraft itself, clone this repository and run:
+The scoped alpha is prepared but not published yet. Until its npm page is live,
+clone this repository and run:
 
 ```bash
 npm ci
@@ -175,7 +170,7 @@ end-to-end application built on QueueCraft.
 1. Automate the guarded AWS test with temporary resources and short-lived credentials.
 2. Add CloudWatch metric mappings and tracing adapters.
 3. Add a small local dashboard for queue health and safe DLQ replay.
-4. Gather pilot feedback and cut the next tagged alpha release.
+4. Publish `@yusufkaranib/queuecraft@0.1.0`, tag it, and gather pilot feedback.
 5. Document YallaQueue as the end-to-end reference architecture.
 
 ## License
