@@ -145,6 +145,11 @@ npm run build
 The unit tests mock AWS. Passing them does not replace the planned real-AWS
 integration test.
 
+A guarded real-AWS test runner is included in
+[`docs/aws-integration-test.md`](docs/aws-integration-test.md). It must be run
+against a dedicated test stack; it deliberately refuses to use a non-empty
+queue. Until its result is captured in CI, the project status remains alpha.
+
 ## Deploy the AWS resources
 
 The template and beginner deployment instructions are in
@@ -154,7 +159,7 @@ policies, and CloudWatch alarms.
 
 ## Roadmap
 
-1. Run an automated publish, retry, duplicate, and DLQ test against temporary AWS resources.
+1. Run the guarded publish, retry, duplicate, and DLQ test and automate it with temporary AWS resources.
 2. Add structured logs, CloudWatch metrics, and tracing hooks.
 3. Add a small local dashboard for queue health and safe DLQ replay.
 4. Publish under an npm scope and create a tagged alpha release.

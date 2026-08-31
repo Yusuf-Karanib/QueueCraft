@@ -19,6 +19,7 @@
     "build": "tsup src/index.ts --format esm --dts --clean --target node20",
     "prepublishOnly": "npm run build",
     "test": "vitest run",
+    "test:aws": "npm run build && node scripts/aws-integration.mjs",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
