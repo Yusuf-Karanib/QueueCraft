@@ -84,8 +84,13 @@ Resources:
                   - iam:GetRole
                   - iam:GetRolePolicy
                   - iam:ListAttachedRolePolicies
+                  - iam:ListPoliciesGrantingServiceAccess
                   - iam:ListRolePolicies
                 Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${BootstrapRoleName}"
+              - Sid: ReadAccountSummaryForIamCapabilityCheck
+                Effect: Allow
+                Action: iam:GetAccountSummary
+                Resource: "*"
 
 Outputs:
   BootstrapRoleArn:

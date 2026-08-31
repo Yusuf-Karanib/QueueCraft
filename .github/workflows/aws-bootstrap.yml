@@ -1,5 +1,7 @@
 name: Temporary AWS bootstrap
 
+# Delete this workflow after the permanent integration role is created.
+
 on:
   workflow_dispatch:
   push:
