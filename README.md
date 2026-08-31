@@ -28,12 +28,12 @@ Implemented:
 - Structured, payload-free lifecycle events for logs and metrics
 - Loopback-only queue dashboard with privacy-redacted DLQ replay
 - Automated checks for Node.js 20 and 22
+- Public npm package: `@yusufkaranib/queuecraft`
 
 Not implemented yet:
 
 - Automated creation and cleanup of temporary AWS integration resources in CI
 - CloudWatch metric mappings and tracing adapters
-- First npm alpha publication; `0.1.0` is prepared but account 2FA is required
 
 ## Why SQS?
 
@@ -54,6 +54,15 @@ side effects. Handlers must still be safe to retry.
 
 SQS redrive policy—not QueueCraft application code—moves repeatedly failing
 messages to the DLQ.
+
+## Install
+
+```bash
+npm install @yusufkaranib/queuecraft
+```
+
+Version `0.1.0` is the first public alpha. Pin the version for controlled pilots
+and review the changelog before upgrading.
 
 ## Publishing a job
 
@@ -131,10 +140,9 @@ The idempotency table uses a String partition key named `messageId`. DynamoDB
 TTL should be enabled on the Number attribute `expiresAt`. Correctness does not
 depend on immediate TTL deletion; lease takeover checks `leaseUntil` directly.
 
-## Run locally
+## Run the repository locally
 
-The scoped alpha is prepared but not published yet. Until its npm page is live,
-clone this repository and run:
+To work on QueueCraft itself, clone this repository and run:
 
 ```bash
 npm ci
@@ -143,7 +151,7 @@ npm run typecheck
 npm run build
 ```
 
-The unit tests mock AWS. Passing them does not replace the planned real-AWS
+The unit tests mock AWS. Passing them does not replace the guarded real-AWS
 integration test.
 
 A guarded real-AWS test runner is included in
@@ -180,8 +188,8 @@ Release steps are documented in [`docs/releasing.md`](docs/releasing.md).
 
 1. Automate the guarded AWS test with temporary resources and short-lived credentials.
 2. Add CloudWatch metric mappings and tracing adapters.
-3. Publish `@yusufkaranib/queuecraft@0.1.0`, tag it, and gather pilot feedback.
-4. Automate package releases with npm trusted publishing and provenance.
+3. Gather feedback from controlled pilots using the public alpha.
+4. Publish future versions through npm trusted publishing with provenance.
 
 ## License
 

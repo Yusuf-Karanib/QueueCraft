@@ -22,3 +22,21 @@ changed by this test.
 This is a manually triggered verification record. The next step is to run the
 same guarded test from GitHub Actions using short-lived AWS credentials and an
 automatically removed test stack.
+
+## 2026-08-31 — public npm alpha
+
+Published source commit: `4d9df0e`
+
+Package: `@yusufkaranib/queuecraft@0.1.0`
+
+Verified behavior:
+
+- PASS: npm reports the scoped package as public and owned by `yusufkaranib`;
+- PASS: a clean install succeeded with an empty npm configuration and fresh
+  cache, so the test did not rely on the publisher's saved login;
+- PASS: the installed package exported `QueueCraftPublisher`,
+  `QueueCraftPoller`, and `createQueueCraftDashboard`;
+- PASS: the installed package provided the `queuecraft-dashboard` command.
+
+Search indexing is not used as release proof because npm documents that newly
+published packages may take time to appear in search results.

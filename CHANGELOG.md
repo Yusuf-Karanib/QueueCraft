@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1 — 2026-08-31
+
+- Corrected the public installation and release documentation after verifying
+  the first anonymous npm install.
+- Added an npm trusted-publishing workflow trigger for version tags.
+
 ## 0.1.0 — 2026-08-31
 
 First public alpha:

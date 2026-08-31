@@ -1,40 +1,40 @@
 # Releasing QueueCraft
 
-QueueCraft uses npm trusted publishing for future releases. GitHub Actions gets
-a short-lived identity for one workflow run. No permanent npm token belongs in
-GitHub secrets.
+QueueCraft uses npm trusted publishing for automated releases. GitHub Actions
+gets a short-lived identity for one workflow run. No permanent npm token
+belongs in GitHub secrets.
 
-## First release only
+## Initial release
 
-The first package version must exist before npm can attach a trusted publisher.
+Version `0.1.0` was published interactively with two-factor authentication on
+2026-08-31. A clean installation with no saved npm login verified that the
+package is public.
 
-1. Enable two-factor authentication for authorization and writes on the
-   `yusufkaranib` npm account.
-2. From a clean, CI-passing `main` branch, run:
+The first version had to exist before npm could attach a trusted publisher.
 
-```powershell
-npm publish --access public
-```
+## One-time trusted-publisher setup
 
-3. Configure the trusted publisher:
+Run this while signed in to the `yusufkaranib` npm account with two-factor
+authentication enabled:
 
 ```powershell
 npm trust github @yusufkaranib/queuecraft --file publish.yml --repo Yusuf-Karanib/QueueCraft --allow-publish -y
 ```
 
-4. Confirm the npm package page links to the public GitHub repository.
-5. Tag the exact published commit and push the tag.
-
 Do not paste an npm token into this repository or a chat.
 
-## Later releases
+## Release a new version
 
 1. Update the version and `CHANGELOG.md`.
 2. Run the complete local checks.
 3. Commit and push to `main`.
 4. Wait for CI to pass.
-5. In GitHub Actions, run **Publish npm package**.
-6. Confirm the npm version, then tag the exact commit.
+5. Tag that exact commit as `v` followed by the package version and push the
+   tag. For example, package version `0.1.1` requires tag `v0.1.1`.
+6. Wait for **Publish npm package** to pass, then verify a clean installation.
+
+The workflow refuses a version tag that does not match `package.json`. It can
+also be started manually from GitHub Actions when needed.
 
 The publish workflow uses a GitHub-hosted runner, Node.js 24, `id-token: write`,
 and npm's OIDC exchange. npm automatically records provenance for a public
