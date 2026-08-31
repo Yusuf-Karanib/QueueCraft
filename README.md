@@ -33,10 +33,7 @@ Not implemented yet:
 - Automated creation and cleanup of temporary AWS integration resources in CI
 - CloudWatch metric mappings and tracing adapters
 - A local queue and DLQ dashboard
-- A published npm package
-
-The unscoped npm name `queuecraft` is already owned by another publisher. A
-scoped package name will be selected before the first npm release.
+- A stable npm release beyond the first public alpha
 
 ## Why SQS?
 
@@ -65,7 +62,7 @@ Meta message ID instead of generating a new value on every retry.
 
 ```ts
 import { SQSClient } from "@aws-sdk/client-sqs";
-import { QueueCraftPublisher } from "queuecraft";
+import { QueueCraftPublisher } from "@yusufkaranib/queuecraft";
 
 const publisher = new QueueCraftPublisher({
   sqsClient: new SQSClient({ region: process.env.AWS_REGION }),
@@ -94,7 +91,7 @@ import {
   IdempotencyStore,
   QueueCraftPoller,
   Semaphore,
-} from "queuecraft";
+} from "@yusufkaranib/queuecraft";
 
 const concurrency = 5;
 const poller = new QueueCraftPoller({
@@ -136,7 +133,13 @@ depend on immediate TTL deletion; lease takeover checks `leaseUntil` directly.
 
 ## Run locally
 
-The package is not on npm yet, so clone this repository first.
+Install the public alpha package:
+
+```bash
+npm install @yusufkaranib/queuecraft
+```
+
+To work on QueueCraft itself, clone this repository and run:
 
 ```bash
 npm ci
@@ -172,7 +175,7 @@ end-to-end application built on QueueCraft.
 1. Automate the guarded AWS test with temporary resources and short-lived credentials.
 2. Add CloudWatch metric mappings and tracing adapters.
 3. Add a small local dashboard for queue health and safe DLQ replay.
-4. Publish under an npm scope and create a tagged alpha release.
+4. Gather pilot feedback and cut the next tagged alpha release.
 5. Document YallaQueue as the end-to-end reference architecture.
 
 ## License

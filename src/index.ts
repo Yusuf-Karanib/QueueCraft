@@ -8,7 +8,7 @@
  *   QueueCraftPoller,
  *   Semaphore,
  *   IdempotencyStore,
- * } from "queuecraft";
+ * } from "@yusufkaranib/queuecraft";
  */
 
 // Publisher

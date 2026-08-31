@@ -1,6 +1,6 @@
 {
-  "name": "queuecraft",
-  "version": "1.1.0",
+  "name": "@yusufkaranib/queuecraft",
+  "version": "0.1.0",
   "description": "Typed AWS SQS publishing and worker utilities",
   "type": "module",
   "main": "./dist/index.js",
@@ -13,7 +13,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --clean --target node20",
@@ -38,6 +39,9 @@
     "url": "https://github.com/Yusuf-Karanib/QueueCraft/issues"
   },
   "homepage": "https://github.com/Yusuf-Karanib/QueueCraft#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=20"
   },
