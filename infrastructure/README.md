@@ -65,5 +65,8 @@ be added later after message-group behavior is specified and tested.
   resources.
 - `github-oidc.yaml` creates the long-lived GitHub identity provider and its
   narrowly scoped test role.
+- `temporary-bootstrap-role.yaml` is an optional one-use role for standalone
+  accounts that do not yet have a non-root administrator. Delete its stack as
+  soon as the GitHub trust stack exists.
 
 Neither template grants access to YallaQueue's queues or tables.

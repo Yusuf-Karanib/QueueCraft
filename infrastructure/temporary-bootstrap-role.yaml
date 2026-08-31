@@ -1,0 +1,84 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Temporary GitHub OIDC role used once to create the permanent QueueCraft integration-test role.
+
+Parameters:
+  BootstrapRoleName:
+    Type: String
+    Default: queuecraft-oidc-bootstrap
+
+  ExistingGitHubOidcProviderArn:
+    Type: String
+    Default: arn:aws:iam::337890360305:oidc-provider/token.actions.githubusercontent.com
+
+  GitHubOwner:
+    Type: String
+    Default: Yusuf-Karanib
+
+  GitHubOwnerId:
+    Type: String
+    Default: "240980687"
+
+  GitHubRepository:
+    Type: String
+    Default: QueueCraft
+
+  GitHubRepositoryId:
+    Type: String
+    Default: "1308168974"
+
+  GitHubBranch:
+    Type: String
+    Default: main
+
+Resources:
+  BootstrapRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref BootstrapRoleName
+      Description: Temporary least-privilege role; delete after the QueueCraft GitHub trust stack is created.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: TrustOnlyQueueCraftMain
+            Effect: Allow
+            Principal:
+              Federated: !Ref ExistingGitHubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOwner}@${GitHubOwnerId}/${GitHubRepository}@${GitHubRepositoryId}:ref:refs/heads/${GitHubBranch}"
+      Policies:
+        - PolicyName: create-only-queuecraft-github-trust
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ManageOnlyQueueCraftTrustStack
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ListStackResources
+                Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/queuecraft-github-trust/*"
+              - Sid: ManageOnlyQueueCraftGitHubRole
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:DeleteRolePolicy
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:PutRolePolicy
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:UpdateRoleDescription
+                Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/queuecraft-github-integration"
+
+Outputs:
+  BootstrapRoleArn:
+    Value: !GetAtt BootstrapRole.Arn

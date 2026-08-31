@@ -34,6 +34,13 @@ Creating this trust is an account-security change. Use a temporary
 administrator session for the bootstrap only. Do not use AWS root credentials
 for normal QueueCraft work.
 
+When a standalone account has no non-root administrator,
+`infrastructure/temporary-bootstrap-role.yaml` can create a temporary GitHub
+OIDC role. `.github/workflows/aws-bootstrap.yml` uses it once to create only the
+`queuecraft-github-trust` stack and `queuecraft-github-integration` role. Delete
+the bootstrap stack and workflow immediately afterward. The temporary role must
+never become a general-purpose deployment identity.
+
 ## Per-run resources
 
 `.github/workflows/aws-integration.yml` creates a unique stack from

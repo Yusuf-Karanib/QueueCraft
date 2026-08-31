@@ -1,0 +1,41 @@
+name: Temporary AWS bootstrap
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/aws-bootstrap.yml
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  create-permanent-test-role:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Get temporary bootstrap credentials
+        uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          role-to-assume: arn:aws:iam::337890360305:role/queuecraft-oidc-bootstrap
+          role-session-name: QueueCraftBootstrap-${{ github.run_id }}
+          aws-region: eu-central-1
+          allowed-account-ids: "337890360305"
+          unset-current-credentials: true
+
+      - name: Create permanent QueueCraft GitHub trust
+        run: |
+          aws cloudformation create-stack \
+            --stack-name queuecraft-github-trust \
+            --template-body file://infrastructure/github-oidc.yaml \
+            --parameters \
+              ParameterKey=CreateGitHubOidcProvider,ParameterValue=false \
+              ParameterKey=ExistingGitHubOidcProviderArn,ParameterValue=arn:aws:iam::337890360305:oidc-provider/token.actions.githubusercontent.com \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --on-failure DELETE \
+            --tags Key=Project,Value=queuecraft Key=Purpose,Value=github-actions-oidc
+          aws cloudformation wait stack-create-complete --stack-name queuecraft-github-trust
