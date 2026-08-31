@@ -65,7 +65,7 @@ Resources:
     Properties:
       RoleName: !Ref RoleName
       Description: Short-lived GitHub Actions identity for isolated QueueCraft AWS tests.
-      MaxSessionDuration: 1800
+      MaxSessionDuration: 3600
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
