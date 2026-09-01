@@ -112,3 +112,20 @@ export type {
   QueueCraftJobInstrumentationContext,
   QueueCraftJobRuntime,
 } from "./instrumentation";
+
+// W3C trace context across SQS
+export {
+  QueueCraftW3CTraceContext,
+  TRACEPARENT_ATTRIBUTE,
+  TRACESTATE_ATTRIBUTE,
+} from "./trace-context";
+
+export type {
+  QueueCraftContextApi,
+  QueueCraftPropagationApi,
+  QueueCraftTraceCarrier,
+  QueueCraftTraceContextExtractor,
+  QueueCraftTraceContextInjector,
+  QueueCraftTraceContextPropagation,
+  QueueCraftW3CTraceContextOptions,
+} from "./trace-context";

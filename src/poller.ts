@@ -25,6 +25,13 @@ import {
   runInstrumentedJob,
   type QueueCraftJobInstrumentation,
 } from "./instrumentation";
+import {
+  readQueueCraftTraceCarrier,
+  runWithQueueCraftTraceContext,
+  TRACEPARENT_ATTRIBUTE,
+  TRACESTATE_ATTRIBUTE,
+  type QueueCraftTraceContextExtractor,
+} from "./trace-context";
 
 /** SQS hard limit on messages returned per `ReceiveMessage` call. */
 const MAX_SQS_BATCH = 10;
@@ -91,6 +98,9 @@ export interface QueueCraftPollerOptions {
   /** Optional active-context wrapper around the business handler. */
   readonly instrumentation?: QueueCraftJobInstrumentation;
 
+  /** Optional W3C context continuation from the producer's SQS attributes. */
+  readonly traceContext?: QueueCraftTraceContextExtractor;
+
   /**
    * Concurrency + polling tuning. `concurrency` MUST match the max used to
    * construct the injected Semaphore — it is the capacity ceiling this poller
@@ -115,6 +125,7 @@ export class QueueCraftPoller {
   private readonly queueUrl: string;
   private readonly handler: JobHandler;
   private readonly instrumentation?: QueueCraftJobInstrumentation;
+  private readonly traceContext?: QueueCraftTraceContextExtractor;
   private readonly onError?: (error: unknown, message?: Message) => void;
   private readonly onEvent?: (event: QueueCraftEvent) => void;
   private readonly idempotencyAttribute: string;
@@ -145,10 +156,21 @@ export class QueueCraftPoller {
     this.queueUrl = options.queueUrl;
     this.handler = options.handler;
     this.instrumentation = options.instrumentation;
+    this.traceContext = options.traceContext;
     this.onError = options.onError;
     this.onEvent = options.onEvent;
     this.idempotencyAttribute =
       options.idempotencyAttribute ?? IDEMPOTENCY_ATTRIBUTE;
+    if (
+      this.traceContext &&
+      [TRACEPARENT_ATTRIBUTE, TRACESTATE_ATTRIBUTE].includes(
+        this.idempotencyAttribute,
+      )
+    ) {
+      throw new RangeError(
+        "idempotencyAttribute cannot use a reserved W3C trace attribute name.",
+      );
+    }
 
     this.maxConcurrency = options.worker.concurrency;
     this.pollIntervalMs = options.worker.pollIntervalMs;
@@ -245,7 +267,15 @@ export class QueueCraftPoller {
           MaxNumberOfMessages: max,
           WaitTimeSeconds: this.waitTimeSeconds,
           VisibilityTimeout: this.visibilityTimeoutSeconds,
-          MessageAttributeNames: [this.idempotencyAttribute],
+          MessageAttributeNames: this.traceContext
+            ? [
+                ...new Set([
+                  this.idempotencyAttribute,
+                  TRACEPARENT_ATTRIBUTE,
+                  TRACESTATE_ATTRIBUTE,
+                ]),
+              ]
+            : [this.idempotencyAttribute],
           MessageSystemAttributeNames: ["ApproximateReceiveCount"],
         }),
         { abortSignal: this.abortController.signal },
@@ -355,17 +385,26 @@ export class QueueCraftPoller {
         attempt,
         signal: handlerController.signal,
       };
-      await runInstrumentedJob({
-        instrumentation: this.instrumentation,
-        context: {
-          runtime: "poller",
-          attempt,
-          signal: context.signal,
-        },
-        operation: async () => {
-          await this.handler(message, context);
-        },
-        onInstrumentationError: (error) => this.reportError(error, message),
+      await runWithQueueCraftTraceContext({
+        traceContext: this.traceContext,
+        carrier: readQueueCraftTraceCarrier(
+          (name) => message.MessageAttributes?.[name]?.StringValue,
+        ),
+        operation: () =>
+          runInstrumentedJob({
+            instrumentation: this.instrumentation,
+            context: {
+              runtime: "poller",
+              attempt,
+              signal: context.signal,
+            },
+            operation: async () => {
+              await this.handler(message, context);
+            },
+            onInstrumentationError: (error) =>
+              this.reportError(error, message),
+          }),
+        onError: (error) => this.reportError(error, message),
       });
     } catch (error) {
       handlerFailed = true;

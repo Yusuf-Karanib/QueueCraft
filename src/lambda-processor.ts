@@ -1,4 +1,4 @@
-import type { Message } from "@aws-sdk/client-sqs";
+import type { Message, MessageAttributeValue } from "@aws-sdk/client-sqs";
 import { randomUUID } from "node:crypto";
 import type { ExecutionLease, IdempotencyStore } from "./idempotency";
 import type { JobContext, JobHandler, QueueCraftEvent } from "./poller";
@@ -8,6 +8,13 @@ import {
   runInstrumentedJob,
   type QueueCraftJobInstrumentation,
 } from "./instrumentation";
+import {
+  readQueueCraftTraceCarrier,
+  runWithQueueCraftTraceContext,
+  TRACEPARENT_ATTRIBUTE,
+  TRACESTATE_ATTRIBUTE,
+  type QueueCraftTraceContextExtractor,
+} from "./trace-context";
 
 export interface LambdaSqsMessageAttribute {
   readonly dataType: string;
@@ -41,6 +48,7 @@ export interface QueueCraftLambdaProcessorOptions {
   readonly idempotency: IdempotencyStore;
   readonly handler: JobHandler;
   readonly instrumentation?: QueueCraftJobInstrumentation;
+  readonly traceContext?: QueueCraftTraceContextExtractor;
   readonly concurrency?: number;
   readonly idempotencyAttribute?: string;
   readonly onError?: (error: unknown, record?: LambdaSqsRecord) => void;
@@ -60,6 +68,7 @@ export class QueueCraftLambdaProcessor {
   private readonly idempotency: IdempotencyStore;
   private readonly handler: JobHandler;
   private readonly instrumentation?: QueueCraftJobInstrumentation;
+  private readonly traceContext?: QueueCraftTraceContextExtractor;
   private readonly semaphore: Semaphore;
   private readonly idempotencyAttribute: string;
   private readonly onError?: (
@@ -73,9 +82,20 @@ export class QueueCraftLambdaProcessor {
     this.idempotency = options.idempotency;
     this.handler = options.handler;
     this.instrumentation = options.instrumentation;
+    this.traceContext = options.traceContext;
     this.semaphore = new Semaphore(concurrency);
     this.idempotencyAttribute =
       options.idempotencyAttribute ?? IDEMPOTENCY_ATTRIBUTE;
+    if (
+      this.traceContext &&
+      [TRACEPARENT_ATTRIBUTE, TRACESTATE_ATTRIBUTE].includes(
+        this.idempotencyAttribute,
+      )
+    ) {
+      throw new RangeError(
+        "idempotencyAttribute cannot use a reserved W3C trace attribute name.",
+      );
+    }
     this.onError = options.onError;
     this.onEvent = options.onEvent;
   }
@@ -159,19 +179,28 @@ export class QueueCraftLambdaProcessor {
         signal,
       };
 
-      await runInstrumentedJob({
-        instrumentation: this.instrumentation,
-        context: {
-          runtime: "lambda",
-          attempt,
-          signal: context.signal,
-        },
-        operation: async () => {
-          await this.handler(message, context);
-          handlerReturned = true;
-        },
-        onInstrumentationError: (instrumentationError) =>
-          this.reportError(instrumentationError, record),
+      await runWithQueueCraftTraceContext({
+        traceContext: this.traceContext,
+        carrier: readQueueCraftTraceCarrier(
+          (name) => record.messageAttributes?.[name]?.stringValue,
+        ),
+        operation: () =>
+          runInstrumentedJob({
+            instrumentation: this.instrumentation,
+            context: {
+              runtime: "lambda",
+              attempt,
+              signal: context.signal,
+            },
+            operation: async () => {
+              await this.handler(message, context);
+              handlerReturned = true;
+            },
+            onInstrumentationError: (instrumentationError) =>
+              this.reportError(instrumentationError, record),
+          }),
+        onError: (traceContextError) =>
+          this.reportError(traceContextError, record),
       });
 
       if (signal.aborted) {
@@ -202,8 +231,28 @@ export class QueueCraftLambdaProcessor {
   }
 
   private toSdkMessage(record: LambdaSqsRecord): Message {
-    const idempotencyValue =
-      record.messageAttributes?.[this.idempotencyAttribute];
+    const attributeNames = this.traceContext
+      ? [
+          this.idempotencyAttribute,
+          TRACEPARENT_ATTRIBUTE,
+          TRACESTATE_ATTRIBUTE,
+        ]
+      : [this.idempotencyAttribute];
+    const messageAttributes = attributeNames.reduce<
+      Record<string, MessageAttributeValue>
+    >((result, name) => {
+      const value = record.messageAttributes?.[name];
+      if (!value) return result;
+
+      result[name] = {
+        DataType: value.dataType,
+        StringValue: value.stringValue,
+        BinaryValue: value.binaryValue
+          ? Buffer.from(value.binaryValue, "base64")
+          : undefined,
+      };
+      return result;
+    }, {});
 
     return {
       MessageId: record.messageId,
@@ -212,17 +261,10 @@ export class QueueCraftLambdaProcessor {
       Attributes: record.attributes
         ? { ...record.attributes }
         : undefined,
-      MessageAttributes: idempotencyValue
-        ? {
-            [this.idempotencyAttribute]: {
-              DataType: idempotencyValue.dataType,
-              StringValue: idempotencyValue.stringValue,
-              BinaryValue: idempotencyValue.binaryValue
-                ? Buffer.from(idempotencyValue.binaryValue, "base64")
-                : undefined,
-            },
-          }
-        : undefined,
+      MessageAttributes:
+        Object.keys(messageAttributes).length > 0
+          ? messageAttributes
+          : undefined,
     };
   }
 

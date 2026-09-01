@@ -7,11 +7,178 @@ import {
   SendMessageCommand
 } from "@aws-sdk/client-sqs";
 import { randomUUID } from "crypto";
+
+// src/trace-context.ts
+var TRACEPARENT_ATTRIBUTE = "traceparent";
+var TRACESTATE_ATTRIBUTE = "tracestate";
+var TRACEPARENT_PATTERN = /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})(?:-(.+))?$/;
+var ALL_ZERO_TRACE_ID = "00000000000000000000000000000000";
+var ALL_ZERO_PARENT_ID = "0000000000000000";
+var MAX_TRACEPARENT_LENGTH = 512;
+var MAX_TRACESTATE_LENGTH = 512;
+var MAX_TRACESTATE_MEMBERS = 32;
+var SIMPLE_TRACESTATE_KEY = /^[a-z][a-z0-9_\-*\/]{0,255}$/;
+var TENANT_TRACESTATE_KEY = /^[a-z0-9][a-z0-9_\-*\/]{0,240}$/;
+var SYSTEM_TRACESTATE_KEY = /^[a-z][a-z0-9_\-*\/]{0,13}$/;
+var TRACESTATE_VALUE = /^[\x20-\x2b\x2d-\x3c\x3e-\x7e]+$/;
+var QueueCraftW3CTraceContext = class {
+  context;
+  propagation;
+  rootContext;
+  constructor(options) {
+    this.context = options.context;
+    this.propagation = options.propagation;
+    this.rootContext = options.rootContext;
+  }
+  inject() {
+    const carrier = {};
+    this.propagation.inject(this.context.active(), carrier);
+    return normalizeInjectedTraceCarrier(carrier);
+  }
+  run(carrier, operation) {
+    const safeCarrier = normalizeInjectedTraceCarrier(carrier);
+    if (!safeCarrier) return operation();
+    const parent = this.propagation.extract(
+      this.rootContext,
+      safeCarrier
+    );
+    return this.context.with(parent, operation);
+  }
+};
+async function runWithQueueCraftTraceContext(options) {
+  if (!options.traceContext || !options.carrier) {
+    await options.operation();
+    return;
+  }
+  let operationPromise;
+  let outcomePromise;
+  let operationCalls = 0;
+  const report = (error) => {
+    try {
+      options.onError?.(error);
+    } catch {
+    }
+  };
+  const runOperation = () => {
+    operationCalls += 1;
+    if (operationPromise) {
+      report(
+        new Error(
+          "QueueCraft trace propagation called the job operation more than once."
+        )
+      );
+      return operationPromise;
+    }
+    operationPromise = Promise.resolve().then(options.operation);
+    outcomePromise = operationPromise.then(
+      () => ({ status: "completed" }),
+      (error) => ({ status: "failed", error })
+    );
+    return operationPromise;
+  };
+  let propagationResult;
+  let synchronousPropagationError;
+  let propagationFailedSynchronously = false;
+  try {
+    propagationResult = options.traceContext.run(
+      options.carrier,
+      runOperation
+    );
+  } catch (error) {
+    propagationFailedSynchronously = true;
+    synchronousPropagationError = error;
+  }
+  if (operationCalls === 0) {
+    if (!propagationFailedSynchronously) {
+      report(
+        new Error(
+          "QueueCraft trace propagation did not start the job operation synchronously."
+        )
+      );
+    }
+    runOperation();
+  }
+  if (!propagationFailedSynchronously) {
+    const finalOutcomePromise = outcomePromise;
+    void Promise.resolve(propagationResult).catch(
+      async (propagationError) => {
+        const finalOutcome = await finalOutcomePromise;
+        if (!(finalOutcome.status === "failed" && propagationError === finalOutcome.error)) {
+          report(propagationError);
+        }
+      }
+    );
+  }
+  const outcome = await outcomePromise;
+  if (propagationFailedSynchronously && !(outcome.status === "failed" && synchronousPropagationError === outcome.error)) {
+    report(synchronousPropagationError);
+  }
+  if (outcome.status === "failed") throw outcome.error;
+}
+function readQueueCraftTraceCarrier(readAttribute) {
+  const traceparent = readAttribute(TRACEPARENT_ATTRIBUTE);
+  if (!isValidTraceparent(traceparent)) return void 0;
+  const tracestate = readAttribute(TRACESTATE_ATTRIBUTE);
+  return isValidTracestate(tracestate) ? { traceparent, tracestate } : { traceparent };
+}
+function normalizeInjectedTraceCarrier(carrier) {
+  if (!carrier) return void 0;
+  const entries = Object.entries(carrier).reduce(
+    (normalized, [key, value]) => {
+      if (typeof value === "string") normalized[key.toLowerCase()] = value;
+      return normalized;
+    },
+    {}
+  );
+  const traceparent = entries.traceparent;
+  if (!isValidTraceparent(traceparent)) return void 0;
+  const tracestate = entries.tracestate;
+  return isValidTracestate(tracestate) ? { traceparent, tracestate } : { traceparent };
+}
+function isValidTraceparent(value) {
+  if (!value || value.length > MAX_TRACEPARENT_LENGTH) return false;
+  const match = TRACEPARENT_PATTERN.exec(value);
+  return Boolean(
+    match && match[1] !== "ff" && (match[1] !== "00" || match[5] === void 0) && match[2] !== ALL_ZERO_TRACE_ID && match[3] !== ALL_ZERO_PARENT_ID
+  );
+}
+function isValidTracestate(value) {
+  if (!value || value.length > MAX_TRACESTATE_LENGTH) return false;
+  const members = value.split(",");
+  if (members.length > MAX_TRACESTATE_MEMBERS) return false;
+  const seenKeys = /* @__PURE__ */ new Set();
+  for (const rawMember of members) {
+    const member = trimTracestateOptionalWhitespace(rawMember);
+    if (!member) continue;
+    const separator = member.indexOf("=");
+    if (separator <= 0 || separator !== member.lastIndexOf("=")) return false;
+    const key = member.slice(0, separator);
+    const memberValue = member.slice(separator + 1);
+    if (seenKeys.has(key) || !isValidTracestateKey(key) || memberValue.length > 256 || !TRACESTATE_VALUE.test(memberValue) || memberValue.endsWith(" ")) {
+      return false;
+    }
+    seenKeys.add(key);
+  }
+  return seenKeys.size > 0;
+}
+function trimTracestateOptionalWhitespace(value) {
+  return value.replace(/^[ \t]+|[ \t]+$/g, "");
+}
+function isValidTracestateKey(key) {
+  const tenantSeparator = key.indexOf("@");
+  if (tenantSeparator < 0) return SIMPLE_TRACESTATE_KEY.test(key);
+  if (tenantSeparator !== key.lastIndexOf("@")) return false;
+  return TENANT_TRACESTATE_KEY.test(key.slice(0, tenantSeparator)) && SYSTEM_TRACESTATE_KEY.test(key.slice(tenantSeparator + 1));
+}
+
+// src/publisher.ts
 var IDEMPOTENCY_ATTRIBUTE = "QueueCraftIdempotencyKey";
 var QueueCraftPublisher = class {
   sqs;
   queueUrl;
   idempotencyAttribute;
+  traceContext;
+  onTraceContextError;
   isFifo;
   constructor(options) {
     if (!options.queueUrl) {
@@ -20,6 +187,15 @@ var QueueCraftPublisher = class {
     this.sqs = options.sqsClient;
     this.queueUrl = options.queueUrl;
     this.idempotencyAttribute = options.idempotencyAttribute ?? IDEMPOTENCY_ATTRIBUTE;
+    this.traceContext = options.traceContext;
+    this.onTraceContextError = options.onTraceContextError;
+    if (this.traceContext && [TRACEPARENT_ATTRIBUTE, TRACESTATE_ATTRIBUTE].includes(
+      this.idempotencyAttribute
+    )) {
+      throw new RangeError(
+        "idempotencyAttribute cannot use a reserved W3C trace attribute name."
+      );
+    }
     this.isFifo = options.queueUrl.endsWith(".fifo");
   }
   /**
@@ -44,6 +220,19 @@ var QueueCraftPublisher = class {
         StringValue: messageId
       }
     };
+    const traceCarrier = this.injectTraceContext();
+    if (traceCarrier) {
+      attributes[TRACEPARENT_ATTRIBUTE] = {
+        DataType: "String",
+        StringValue: traceCarrier.traceparent
+      };
+      if (traceCarrier.tracestate) {
+        attributes[TRACESTATE_ATTRIBUTE] = {
+          DataType: "String",
+          StringValue: traceCarrier.tracestate
+        };
+      }
+    }
     const result = await this.sqs.send(
       new SendMessageCommand({
         QueueUrl: this.queueUrl,
@@ -57,6 +246,28 @@ var QueueCraftPublisher = class {
       })
     );
     return { messageId, sqsMessageId: result.MessageId };
+  }
+  injectTraceContext() {
+    if (!this.traceContext) return void 0;
+    try {
+      const injected = this.traceContext.inject();
+      const normalized = normalizeInjectedTraceCarrier(injected);
+      if (injected && !normalized) {
+        this.reportTraceContextError(
+          new Error("Trace injector returned an invalid W3C traceparent.")
+        );
+      }
+      return normalized;
+    } catch (error) {
+      this.reportTraceContextError(error);
+      return void 0;
+    }
+  }
+  reportTraceContextError(error) {
+    try {
+      this.onTraceContextError?.(error);
+    } catch {
+    }
   }
 };
 
@@ -153,6 +364,7 @@ var QueueCraftPoller = class {
   queueUrl;
   handler;
   instrumentation;
+  traceContext;
   onError;
   onEvent;
   idempotencyAttribute;
@@ -177,9 +389,17 @@ var QueueCraftPoller = class {
     this.queueUrl = options.queueUrl;
     this.handler = options.handler;
     this.instrumentation = options.instrumentation;
+    this.traceContext = options.traceContext;
     this.onError = options.onError;
     this.onEvent = options.onEvent;
     this.idempotencyAttribute = options.idempotencyAttribute ?? IDEMPOTENCY_ATTRIBUTE;
+    if (this.traceContext && [TRACEPARENT_ATTRIBUTE, TRACESTATE_ATTRIBUTE].includes(
+      this.idempotencyAttribute
+    )) {
+      throw new RangeError(
+        "idempotencyAttribute cannot use a reserved W3C trace attribute name."
+      );
+    }
     this.maxConcurrency = options.worker.concurrency;
     this.pollIntervalMs = options.worker.pollIntervalMs;
     this.waitTimeSeconds = options.worker.waitTimeSeconds ?? 20;
@@ -255,7 +475,13 @@ var QueueCraftPoller = class {
         MaxNumberOfMessages: max,
         WaitTimeSeconds: this.waitTimeSeconds,
         VisibilityTimeout: this.visibilityTimeoutSeconds,
-        MessageAttributeNames: [this.idempotencyAttribute],
+        MessageAttributeNames: this.traceContext ? [
+          .../* @__PURE__ */ new Set([
+            this.idempotencyAttribute,
+            TRACEPARENT_ATTRIBUTE,
+            TRACESTATE_ATTRIBUTE
+          ])
+        ] : [this.idempotencyAttribute],
         MessageSystemAttributeNames: ["ApproximateReceiveCount"]
       }),
       { abortSignal: this.abortController.signal }
@@ -343,17 +569,24 @@ var QueueCraftPoller = class {
         attempt,
         signal: handlerController.signal
       };
-      await runInstrumentedJob({
-        instrumentation: this.instrumentation,
-        context: {
-          runtime: "poller",
-          attempt,
-          signal: context.signal
-        },
-        operation: async () => {
-          await this.handler(message, context);
-        },
-        onInstrumentationError: (error) => this.reportError(error, message)
+      await runWithQueueCraftTraceContext({
+        traceContext: this.traceContext,
+        carrier: readQueueCraftTraceCarrier(
+          (name) => message.MessageAttributes?.[name]?.StringValue
+        ),
+        operation: () => runInstrumentedJob({
+          instrumentation: this.instrumentation,
+          context: {
+            runtime: "poller",
+            attempt,
+            signal: context.signal
+          },
+          operation: async () => {
+            await this.handler(message, context);
+          },
+          onInstrumentationError: (error) => this.reportError(error, message)
+        }),
+        onError: (error) => this.reportError(error, message)
       });
     } catch (error) {
       handlerFailed = true;
@@ -675,6 +908,7 @@ var QueueCraftLambdaProcessor = class {
   idempotency;
   handler;
   instrumentation;
+  traceContext;
   semaphore;
   idempotencyAttribute;
   onError;
@@ -684,8 +918,16 @@ var QueueCraftLambdaProcessor = class {
     this.idempotency = options.idempotency;
     this.handler = options.handler;
     this.instrumentation = options.instrumentation;
+    this.traceContext = options.traceContext;
     this.semaphore = new Semaphore(concurrency);
     this.idempotencyAttribute = options.idempotencyAttribute ?? IDEMPOTENCY_ATTRIBUTE;
+    if (this.traceContext && [TRACEPARENT_ATTRIBUTE, TRACESTATE_ATTRIBUTE].includes(
+      this.idempotencyAttribute
+    )) {
+      throw new RangeError(
+        "idempotencyAttribute cannot use a reserved W3C trace attribute name."
+      );
+    }
     this.onError = options.onError;
     this.onEvent = options.onEvent;
   }
@@ -751,18 +993,25 @@ var QueueCraftLambdaProcessor = class {
         attempt,
         signal
       };
-      await runInstrumentedJob({
-        instrumentation: this.instrumentation,
-        context: {
-          runtime: "lambda",
-          attempt,
-          signal: context.signal
-        },
-        operation: async () => {
-          await this.handler(message, context);
-          handlerReturned = true;
-        },
-        onInstrumentationError: (instrumentationError) => this.reportError(instrumentationError, record)
+      await runWithQueueCraftTraceContext({
+        traceContext: this.traceContext,
+        carrier: readQueueCraftTraceCarrier(
+          (name) => record.messageAttributes?.[name]?.stringValue
+        ),
+        operation: () => runInstrumentedJob({
+          instrumentation: this.instrumentation,
+          context: {
+            runtime: "lambda",
+            attempt,
+            signal: context.signal
+          },
+          operation: async () => {
+            await this.handler(message, context);
+            handlerReturned = true;
+          },
+          onInstrumentationError: (instrumentationError) => this.reportError(instrumentationError, record)
+        }),
+        onError: (traceContextError) => this.reportError(traceContextError, record)
       });
       if (signal.aborted) {
         throw new Error("Lambda invocation is ending before job completion.");
@@ -790,19 +1039,27 @@ var QueueCraftLambdaProcessor = class {
     }
   }
   toSdkMessage(record) {
-    const idempotencyValue = record.messageAttributes?.[this.idempotencyAttribute];
+    const attributeNames = this.traceContext ? [
+      this.idempotencyAttribute,
+      TRACEPARENT_ATTRIBUTE,
+      TRACESTATE_ATTRIBUTE
+    ] : [this.idempotencyAttribute];
+    const messageAttributes = attributeNames.reduce((result, name) => {
+      const value = record.messageAttributes?.[name];
+      if (!value) return result;
+      result[name] = {
+        DataType: value.dataType,
+        StringValue: value.stringValue,
+        BinaryValue: value.binaryValue ? Buffer.from(value.binaryValue, "base64") : void 0
+      };
+      return result;
+    }, {});
     return {
       MessageId: record.messageId,
       ReceiptHandle: record.receiptHandle,
       Body: record.body,
       Attributes: record.attributes ? { ...record.attributes } : void 0,
-      MessageAttributes: idempotencyValue ? {
-        [this.idempotencyAttribute]: {
-          DataType: idempotencyValue.dataType,
-          StringValue: idempotencyValue.stringValue,
-          BinaryValue: idempotencyValue.binaryValue ? Buffer.from(idempotencyValue.binaryValue, "base64") : void 0
-        }
-      } : void 0
+      MessageAttributes: Object.keys(messageAttributes).length > 0 ? messageAttributes : void 0
     };
   }
   receiveCount(record) {
@@ -1423,7 +1680,10 @@ export {
   QueueCraftPoller,
   QueueCraftPublisher,
   QueueCraftTracingObserver,
+  QueueCraftW3CTraceContext,
   Semaphore,
+  TRACEPARENT_ATTRIBUTE,
+  TRACESTATE_ATTRIBUTE,
   createQueueCraftDashboard,
   mapQueueCraftEventToCloudWatchMetrics
 };

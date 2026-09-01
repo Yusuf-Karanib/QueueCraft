@@ -12,6 +12,13 @@ import {
   type MessageAttributeValue,
 } from "@aws-sdk/client-sqs";
 import { randomUUID } from "node:crypto";
+import {
+  normalizeInjectedTraceCarrier,
+  TRACEPARENT_ATTRIBUTE,
+  TRACESTATE_ATTRIBUTE,
+  type QueueCraftTraceCarrier,
+  type QueueCraftTraceContextInjector,
+} from "./trace-context";
 
 /**
  * Message-attribute name carrying QueueCraft's idempotency key.
@@ -31,6 +38,12 @@ export interface QueueCraftPublisherOptions {
 
   /** Override the attribute name used for the idempotency key. */
   readonly idempotencyAttribute?: string;
+
+  /** Optional W3C trace-context injector for producer-to-worker traces. */
+  readonly traceContext?: QueueCraftTraceContextInjector;
+
+  /** Receives trace-injection errors. Trace failures never block publishing. */
+  readonly onTraceContextError?: (error: unknown) => void;
 }
 
 /** Optional per-message knobs. */
@@ -65,6 +78,8 @@ export class QueueCraftPublisher {
   private readonly sqs: SQSClient;
   private readonly queueUrl: string;
   private readonly idempotencyAttribute: string;
+  private readonly traceContext?: QueueCraftTraceContextInjector;
+  private readonly onTraceContextError?: (error: unknown) => void;
   private readonly isFifo: boolean;
 
   constructor(options: QueueCraftPublisherOptions) {
@@ -75,6 +90,18 @@ export class QueueCraftPublisher {
     this.queueUrl = options.queueUrl;
     this.idempotencyAttribute =
       options.idempotencyAttribute ?? IDEMPOTENCY_ATTRIBUTE;
+    this.traceContext = options.traceContext;
+    this.onTraceContextError = options.onTraceContextError;
+    if (
+      this.traceContext &&
+      [TRACEPARENT_ATTRIBUTE, TRACESTATE_ATTRIBUTE].includes(
+        this.idempotencyAttribute,
+      )
+    ) {
+      throw new RangeError(
+        "idempotencyAttribute cannot use a reserved W3C trace attribute name.",
+      );
+    }
     this.isFifo = options.queueUrl.endsWith(".fifo");
   }
 
@@ -106,6 +133,20 @@ export class QueueCraftPublisher {
       },
     };
 
+    const traceCarrier = this.injectTraceContext();
+    if (traceCarrier) {
+      attributes[TRACEPARENT_ATTRIBUTE] = {
+        DataType: "String",
+        StringValue: traceCarrier.traceparent,
+      };
+      if (traceCarrier.tracestate) {
+        attributes[TRACESTATE_ATTRIBUTE] = {
+          DataType: "String",
+          StringValue: traceCarrier.tracestate,
+        };
+      }
+    }
+
     const result = await this.sqs.send(
       new SendMessageCommand({
         QueueUrl: this.queueUrl,
@@ -122,5 +163,31 @@ export class QueueCraftPublisher {
     );
 
     return { messageId, sqsMessageId: result.MessageId };
+  }
+
+  private injectTraceContext(): QueueCraftTraceCarrier | undefined {
+    if (!this.traceContext) return undefined;
+
+    try {
+      const injected = this.traceContext.inject();
+      const normalized = normalizeInjectedTraceCarrier(injected);
+      if (injected && !normalized) {
+        this.reportTraceContextError(
+          new Error("Trace injector returned an invalid W3C traceparent."),
+        );
+      }
+      return normalized;
+    } catch (error) {
+      this.reportTraceContextError(error);
+      return undefined;
+    }
+  }
+
+  private reportTraceContextError(error: unknown): void {
+    try {
+      this.onTraceContextError?.(error);
+    } catch {
+      // Observability callbacks must never prevent publishing a job.
+    }
   }
 }

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 vi.mock("@aws-sdk/client-sqs", () => {
   class SQSClient {
@@ -68,10 +69,17 @@ import { IDEMPOTENCY_ATTRIBUTE } from "./publisher";
 import { Semaphore } from "./semaphore";
 import type { WorkerOptions } from "./types";
 import type { QueueCraftJobInstrumentation } from "./instrumentation";
+import {
+  TRACEPARENT_ATTRIBUTE,
+  TRACESTATE_ATTRIBUTE,
+  type QueueCraftTraceContextPropagation,
+} from "./trace-context";
 
 const QUEUE_URL =
   "https://sqs.me-central-1.amazonaws.com/123456789012/queuecraft-test";
 const STABLE_JOB_ID = "whatsapp-message-123";
+const TRACEPARENT =
+  "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
 const delay = <T>(ms: number, value: T): Promise<T> =>
   new Promise((resolve) => setTimeout(() => resolve(value), ms));
@@ -98,6 +106,7 @@ function createHarness(
   existingState?: (typeof LeaseState)[keyof typeof LeaseState],
   workerOverrides: Partial<WorkerOptions> = {},
   instrumentation?: QueueCraftJobInstrumentation,
+  traceContext?: QueueCraftTraceContextPropagation,
 ): Harness {
   const message: Message = {
     MessageId: "sqs-message-1",
@@ -168,6 +177,7 @@ function createHarness(
     queueUrl: QUEUE_URL,
     handler,
     instrumentation,
+    traceContext,
     worker,
     onError,
     onEvent,
@@ -256,6 +266,88 @@ describe("QueueCraftPoller", () => {
     expect(commandsOfType(harness.sqsSend, "DeleteMessage")).toHaveLength(1);
   });
 
+  it("restores each producer context outside active handler tracing", async () => {
+    const storage = new AsyncLocalStorage<string>();
+    const traceContext: QueueCraftTraceContextPropagation = {
+      inject: () => ({ traceparent: TRACEPARENT }),
+      run: (carrier, operation) =>
+        storage.run(carrier.traceparent, operation),
+    };
+    const instrumentation: QueueCraftJobInstrumentation = {
+      async run(_context, operation) {
+        expect(storage.getStore()).toBe(TRACEPARENT);
+        await operation();
+        expect(storage.getStore()).toBe(TRACEPARENT);
+      },
+    };
+    const harness = createHarness(
+      async () => {
+        expect(storage.getStore()).toBe(TRACEPARENT);
+        await Promise.resolve();
+        expect(storage.getStore()).toBe(TRACEPARENT);
+      },
+      undefined,
+      {},
+      instrumentation,
+      traceContext,
+    );
+    harness.message.MessageAttributes = {
+      ...harness.message.MessageAttributes,
+      [TRACEPARENT_ATTRIBUTE]: {
+        DataType: "String",
+        StringValue: TRACEPARENT,
+      },
+      [TRACESTATE_ATTRIBUTE]: {
+        DataType: "String",
+        StringValue: "vendor=value",
+      },
+      baggage: {
+        DataType: "String",
+        StringValue: "customer_id=private",
+      },
+    };
+
+    await runOnce(harness.poller);
+
+    expect(harness.handler).toHaveBeenCalledOnce();
+    expect(commandsOfType(harness.sqsSend, "DeleteMessage")).toHaveLength(1);
+    expect(
+      commandsOfType(harness.sqsSend, "ReceiveMessage")[0][0].input,
+    ).toMatchObject({
+      MessageAttributeNames: [
+        IDEMPOTENCY_ATTRIBUTE,
+        TRACEPARENT_ATTRIBUTE,
+        TRACESTATE_ATTRIBUTE,
+      ],
+    });
+    expect(storage.getStore()).toBeUndefined();
+  });
+
+  it("ignores an invalid remote parent without failing the job", async () => {
+    const run = vi.fn((_carrier, operation: () => Promise<void>) => operation());
+    const harness = createHarness(
+      async () => undefined,
+      undefined,
+      {},
+      undefined,
+      { inject: () => ({ traceparent: TRACEPARENT }), run },
+    );
+    harness.message.MessageAttributes = {
+      ...harness.message.MessageAttributes,
+      [TRACEPARENT_ATTRIBUTE]: {
+        DataType: "String",
+        StringValue:
+          "00-00000000000000000000000000000000-00f067aa0ba902b7-01",
+      },
+    };
+
+    await runOnce(harness.poller);
+
+    expect(run).not.toHaveBeenCalled();
+    expect(harness.handler).toHaveBeenCalledOnce();
+    expect(commandsOfType(harness.sqsSend, "DeleteMessage")).toHaveLength(1);
+  });
+
   it("does not retry successful work when instrumentation fails afterward", async () => {
     const tracingError = new Error("span export failed");
     const harness = createHarness(
@@ -300,6 +392,28 @@ describe("QueueCraftPoller", () => {
       {},
       { run },
     );
+
+    await runOnce(harness.poller);
+
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("does not restore trace context for a completed duplicate", async () => {
+    const run = vi.fn((_carrier, operation: () => Promise<void>) => operation());
+    const harness = createHarness(
+      async () => undefined,
+      LeaseState.Completed,
+      {},
+      undefined,
+      { inject: () => ({ traceparent: TRACEPARENT }), run },
+    );
+    harness.message.MessageAttributes = {
+      ...harness.message.MessageAttributes,
+      [TRACEPARENT_ATTRIBUTE]: {
+        DataType: "String",
+        StringValue: TRACEPARENT,
+      },
+    };
 
     await runOnce(harness.poller);
 

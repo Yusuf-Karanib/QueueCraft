@@ -2,6 +2,55 @@ import { SQSClient, Message } from '@aws-sdk/client-sqs';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { PutMetricDataCommand, MetricDatum } from '@aws-sdk/client-cloudwatch';
 
+/** SQS attribute carrying the W3C `traceparent` value. */
+declare const TRACEPARENT_ATTRIBUTE = "traceparent";
+/** SQS attribute carrying the optional W3C `tracestate` value. */
+declare const TRACESTATE_ATTRIBUTE = "tracestate";
+/** Privacy-limited W3C fields that QueueCraft may carry across SQS. */
+interface QueueCraftTraceCarrier {
+    readonly traceparent: string;
+    readonly tracestate?: string;
+}
+/** Supplies the current W3C carrier to a QueueCraft publisher. */
+interface QueueCraftTraceContextInjector {
+    inject(): QueueCraftTraceCarrier | undefined;
+}
+/** Restores an upstream W3C carrier around one worker operation. */
+interface QueueCraftTraceContextExtractor {
+    run(carrier: QueueCraftTraceCarrier, operation: () => Promise<void>): Promise<void> | void;
+}
+/** Combined injector/extractor implemented by the built-in adapter. */
+interface QueueCraftTraceContextPropagation extends QueueCraftTraceContextInjector, QueueCraftTraceContextExtractor {
+}
+/** Structural subset of an OpenTelemetry-compatible context API. */
+interface QueueCraftContextApi<TContext> {
+    active(): TContext;
+    with<T>(context: TContext, operation: () => T): T;
+}
+/** Structural subset of an OpenTelemetry-compatible propagation API. */
+interface QueueCraftPropagationApi<TContext> {
+    inject(context: TContext, carrier: Record<string, string>): void;
+    extract(context: TContext, carrier: QueueCraftTraceCarrier): TContext;
+}
+interface QueueCraftW3CTraceContextOptions<TContext> {
+    readonly context: QueueCraftContextApi<TContext>;
+    readonly propagation: QueueCraftPropagationApi<TContext>;
+    /** Clean base used when extracting a remote producer context. */
+    readonly rootContext: TContext;
+}
+/**
+ * Bridges QueueCraft to the official OpenTelemetry context and propagation
+ * APIs without adding OpenTelemetry as a runtime dependency.
+ */
+declare class QueueCraftW3CTraceContext<TContext> implements QueueCraftTraceContextPropagation {
+    private readonly context;
+    private readonly propagation;
+    private readonly rootContext;
+    constructor(options: QueueCraftW3CTraceContextOptions<TContext>);
+    inject(): QueueCraftTraceCarrier | undefined;
+    run(carrier: QueueCraftTraceCarrier, operation: () => Promise<void>): Promise<void>;
+}
+
 /**
  * QueueCraft — publisher
  *
@@ -26,6 +75,10 @@ interface QueueCraftPublisherOptions {
     readonly queueUrl: string;
     /** Override the attribute name used for the idempotency key. */
     readonly idempotencyAttribute?: string;
+    /** Optional W3C trace-context injector for producer-to-worker traces. */
+    readonly traceContext?: QueueCraftTraceContextInjector;
+    /** Receives trace-injection errors. Trace failures never block publishing. */
+    readonly onTraceContextError?: (error: unknown) => void;
 }
 /** Optional per-message knobs. */
 interface PublishOptions {
@@ -53,6 +106,8 @@ declare class QueueCraftPublisher {
     private readonly sqs;
     private readonly queueUrl;
     private readonly idempotencyAttribute;
+    private readonly traceContext?;
+    private readonly onTraceContextError?;
     private readonly isFifo;
     constructor(options: QueueCraftPublisherOptions);
     /**
@@ -61,6 +116,8 @@ declare class QueueCraftPublisher {
      * publish can be correlated or safely retried.
      */
     publish(payload: unknown, options?: PublishOptions): Promise<PublishResult>;
+    private injectTraceContext;
+    private reportTraceContextError;
 }
 
 /**
@@ -311,6 +368,8 @@ interface QueueCraftPollerOptions {
     readonly handler: JobHandler;
     /** Optional active-context wrapper around the business handler. */
     readonly instrumentation?: QueueCraftJobInstrumentation;
+    /** Optional W3C context continuation from the producer's SQS attributes. */
+    readonly traceContext?: QueueCraftTraceContextExtractor;
     /**
      * Concurrency + polling tuning. `concurrency` MUST match the max used to
      * construct the injected Semaphore — it is the capacity ceiling this poller
@@ -331,6 +390,7 @@ declare class QueueCraftPoller {
     private readonly queueUrl;
     private readonly handler;
     private readonly instrumentation?;
+    private readonly traceContext?;
     private readonly onError?;
     private readonly onEvent?;
     private readonly idempotencyAttribute;
@@ -412,6 +472,7 @@ interface QueueCraftLambdaProcessorOptions {
     readonly idempotency: IdempotencyStore;
     readonly handler: JobHandler;
     readonly instrumentation?: QueueCraftJobInstrumentation;
+    readonly traceContext?: QueueCraftTraceContextExtractor;
     readonly concurrency?: number;
     readonly idempotencyAttribute?: string;
     readonly onError?: (error: unknown, record?: LambdaSqsRecord) => void;
@@ -429,6 +490,7 @@ declare class QueueCraftLambdaProcessor {
     private readonly idempotency;
     private readonly handler;
     private readonly instrumentation?;
+    private readonly traceContext?;
     private readonly semaphore;
     private readonly idempotencyAttribute;
     private readonly onError?;
@@ -581,4 +643,4 @@ declare class QueueCraftTracingObserver {
     private reportError;
 }
 
-export { type AcquireLockResult, type EpochMillis, type ExecutionLease, IDEMPOTENCY_ATTRIBUTE, IdempotencyStore, type IdempotencyStoreOptions, type Job, type JobContext, type JobHandler, type JobStatus, type LambdaBatchItemFailure, type LambdaProcessOptions, type LambdaSqsBatchResponse, type LambdaSqsEvent, type LambdaSqsMessageAttribute, type LambdaSqsRecord, LeaseState, type PublishOptions, type PublishResult, type QueueCraftActiveTracer, QueueCraftActiveTracing, type QueueCraftActiveTracingOptions, type QueueCraftCloudWatchClient, type QueueCraftCloudWatchMetricMappingOptions, QueueCraftCloudWatchMetrics, type QueueCraftCloudWatchMetricsOptions, type QueueCraftConfig, type QueueCraftDashboard, type QueueCraftDashboardOptions, type QueueCraftEvent, type QueueCraftJobInstrumentation, type QueueCraftJobInstrumentationContext, type QueueCraftJobRuntime, QueueCraftLambdaProcessor, type QueueCraftLambdaProcessorOptions, QueueCraftPoller, type QueueCraftPollerOptions, QueueCraftPublisher, type QueueCraftPublisherOptions, type QueueCraftSpanAttributeValue, type QueueCraftSpanAttributes, type QueueCraftTraceSpan, type QueueCraftTracer, QueueCraftTracingObserver, type QueueCraftTracingObserverOptions, Semaphore, type WorkerOptions, createQueueCraftDashboard, mapQueueCraftEventToCloudWatchMetrics };
+export { type AcquireLockResult, type EpochMillis, type ExecutionLease, IDEMPOTENCY_ATTRIBUTE, IdempotencyStore, type IdempotencyStoreOptions, type Job, type JobContext, type JobHandler, type JobStatus, type LambdaBatchItemFailure, type LambdaProcessOptions, type LambdaSqsBatchResponse, type LambdaSqsEvent, type LambdaSqsMessageAttribute, type LambdaSqsRecord, LeaseState, type PublishOptions, type PublishResult, type QueueCraftActiveTracer, QueueCraftActiveTracing, type QueueCraftActiveTracingOptions, type QueueCraftCloudWatchClient, type QueueCraftCloudWatchMetricMappingOptions, QueueCraftCloudWatchMetrics, type QueueCraftCloudWatchMetricsOptions, type QueueCraftConfig, type QueueCraftContextApi, type QueueCraftDashboard, type QueueCraftDashboardOptions, type QueueCraftEvent, type QueueCraftJobInstrumentation, type QueueCraftJobInstrumentationContext, type QueueCraftJobRuntime, QueueCraftLambdaProcessor, type QueueCraftLambdaProcessorOptions, QueueCraftPoller, type QueueCraftPollerOptions, type QueueCraftPropagationApi, QueueCraftPublisher, type QueueCraftPublisherOptions, type QueueCraftSpanAttributeValue, type QueueCraftSpanAttributes, type QueueCraftTraceCarrier, type QueueCraftTraceContextExtractor, type QueueCraftTraceContextInjector, type QueueCraftTraceContextPropagation, type QueueCraftTraceSpan, type QueueCraftTracer, QueueCraftTracingObserver, type QueueCraftTracingObserverOptions, QueueCraftW3CTraceContext, type QueueCraftW3CTraceContextOptions, Semaphore, TRACEPARENT_ATTRIBUTE, TRACESTATE_ATTRIBUTE, type WorkerOptions, createQueueCraftDashboard, mapQueueCraftEventToCloudWatchMetrics };

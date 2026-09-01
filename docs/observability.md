@@ -144,8 +144,9 @@ settlement time. It does not create active context around the business handler.
 runs the business handler inside `startActiveSpan`, so instrumented database and
 API calls can become child spans.
 
-This API is currently on `main` and planned for the next minor npm release. It
-is not part of the published `0.2.0` package.
+This API and the W3C propagation adapter below are currently on `main` and
+planned for the next minor npm release. They are not part of the published
+`0.2.0` package.
 
 ```ts
 import {
@@ -185,9 +186,89 @@ A custom `QueueCraftJobInstrumentation` implementation must invoke the provided
 operation synchronously, await it, then settle. QueueCraft prevents a second
 invocation and does not let delayed tracer cleanup block job settlement.
 
-This creates active context inside the consumer. It does not yet inject trace
-headers when publishing or extract an upstream trace from SQS. That cross-queue
-carrier needs a separate privacy and compatibility review.
+## Producer-to-worker W3C trace context
+
+`QueueCraftW3CTraceContext` connects QueueCraft to the application's existing
+OpenTelemetry context and propagation APIs. QueueCraft does not import
+OpenTelemetry at runtime and does not choose an exporter or sampling policy.
+
+Install the optional API in the application, then configure an OpenTelemetry
+SDK, asynchronous context manager, and W3C propagator by following the
+[OpenTelemetry JavaScript setup](https://opentelemetry.io/docs/languages/js/getting-started/nodejs/):
+
+```bash
+npm install @opentelemetry/api
+```
+
+```ts
+import { context, propagation, ROOT_CONTEXT, trace } from "@opentelemetry/api";
+import {
+  QueueCraftActiveTracing,
+  QueueCraftPoller,
+  QueueCraftPublisher,
+  QueueCraftW3CTraceContext,
+} from "@yusufkaranib/queuecraft";
+
+const tracer = trace.getTracer("booking-worker");
+const traceContext = new QueueCraftW3CTraceContext({
+  context,
+  propagation,
+  rootContext: ROOT_CONTEXT,
+});
+
+const publisher = new QueueCraftPublisher({
+  // Other required options...
+  traceContext,
+  onTraceContextError(error) {
+    console.error("QueueCraft trace injection failed", error);
+  },
+});
+
+const poller = new QueueCraftPoller({
+  // Other required options...
+  traceContext,
+  instrumentation: new QueueCraftActiveTracing({ tracer }),
+});
+```
+
+Use the same `traceContext` option with `QueueCraftLambdaProcessor`. Extraction
+happens separately for each Lambda record, not once around the whole batch.
+The remote producer context is restored first; active handler tracing then
+creates the consumer span inside it.
+
+The application must register a real OpenTelemetry SDK, asynchronous context
+manager, and W3C propagator. The bare `@opentelemetry/api` package uses no-op
+implementations and will not inject a carrier by itself.
+
+QueueCraft transports only two fixed, lowercase SQS String attributes:
+`traceparent` and optional `tracestate`. It deliberately drops baggage. With
+the idempotency attribute, a traced QueueCraft job uses 3 of SQS's maximum 10
+message attributes. Attribute bytes also count toward SQS's 1 MiB message
+limit and can move a near-boundary message into another billed 64 KiB request
+unit.
+
+Treat trace context as private operational metadata, not authentication. A
+queue writer can forge a valid trace ID, and vendor `tracestate` values can be
+correlatable. Enable propagation only across a trusted queue boundary. Raw
+carrier values never enter QueueCraft events, metrics, logs, idempotency
+records, or span attributes. Malformed carriers are ignored and never fail a
+job.
+
+Never put customer, message, credential, or other personally identifiable data
+in `tracestate`. Its vendor values are opaque to QueueCraft, so QueueCraft can
+validate their wire format but cannot determine whether their content is safe.
+
+QueueCraft does not create a producer/send span. For one-message processing,
+the extracted producer context becomes the handler span's parent. Each retry
+can therefore create a sibling consumer span under the same producer. A
+duplicate stopped by the idempotency lease creates no handler span. QueueCraft
+does not yet create span links for Lambda batches or replay operations.
+
+The local DLQ replay copies the original message attributes, so it preserves
+the original trace carrier. A later replay-specific span/link policy may make
+that relationship more explicit. Propagation failures are isolated: the
+publisher still sends once without trace fields, and a worker still runs the
+handler once without the remote context.
 
 The CloudFormation template also creates queue-level alarms for DLQ messages
 and the approximate age of the oldest unprocessed message. It can optionally create a sustained

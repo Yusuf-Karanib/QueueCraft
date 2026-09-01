@@ -56,6 +56,9 @@ queuecraft-dashboard
 Replay copies the original body and message attributes to the main queue, then
 deletes the DLQ message. If sending succeeds but deletion fails, QueueCraft
 remembers that send for the short cache lifetime and retries only the deletion.
+An existing `traceparent` and `tracestate` are therefore preserved; replay
+currently continues the original producer trace rather than creating a new
+replay span.
 
 An application should keep the original stable idempotency attribute. That
 lets the worker suppress a replay when the logical job already completed.

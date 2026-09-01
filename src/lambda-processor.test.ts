@@ -1,10 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { IdempotencyStore } from "./idempotency";
 import { QueueCraftLambdaProcessor, type LambdaSqsRecord } from "./lambda-processor";
 import { IDEMPOTENCY_ATTRIBUTE } from "./publisher";
 import type { QueueCraftJobInstrumentation } from "./instrumentation";
+import {
+  TRACEPARENT_ATTRIBUTE,
+  TRACESTATE_ATTRIBUTE,
+  type QueueCraftTraceContextPropagation,
+} from "./trace-context";
 
 const lease = { messageId: "meta-message-1", ownerId: "owner-1" };
+const TRACEPARENT =
+  "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+const SECOND_TRACEPARENT =
+  "00-80e1afed08e019fc1110464cfa66635c-7a085853722dc6d2-01";
 
 function record(messageId = "sqs-message-1"): LambdaSqsRecord {
   return {
@@ -24,6 +34,7 @@ function record(messageId = "sqs-message-1"): LambdaSqsRecord {
 function harness(
   status: "acquired" | "completed" | "in_progress" = "acquired",
   instrumentation?: QueueCraftJobInstrumentation,
+  traceContext?: QueueCraftTraceContextPropagation,
 ) {
   const acquireLock = vi.fn().mockResolvedValue(
     status === "acquired" ? { status, lease } : { status },
@@ -42,6 +53,7 @@ function harness(
     idempotency,
     handler,
     instrumentation,
+    traceContext,
     concurrency: 2,
     onError,
     onEvent,
@@ -87,6 +99,34 @@ describe("QueueCraftLambdaProcessor", () => {
     ]);
   });
 
+  it("does not expose trace attributes to the handler unless opted in", async () => {
+    const test = harness();
+    const base = record();
+    const input: LambdaSqsRecord = {
+      ...base,
+      messageAttributes: {
+        ...base.messageAttributes,
+        [TRACEPARENT_ATTRIBUTE]: {
+          dataType: "String",
+          stringValue: TRACEPARENT,
+        },
+        [TRACESTATE_ATTRIBUTE]: {
+          dataType: "String",
+          stringValue: "vendor=value",
+        },
+      },
+    };
+
+    await test.processor.process({ Records: [input] });
+
+    expect(test.handler.mock.calls[0][0].MessageAttributes).toEqual({
+      [IDEMPOTENCY_ATTRIBUTE]: {
+        DataType: "String",
+        StringValue: "meta-message-1",
+      },
+    });
+  });
+
   it("runs an acquired Lambda handler inside privacy-safe instrumentation", async () => {
     const run = vi.fn(async (context, execute: () => Promise<void>) => {
       expect(context).toEqual({
@@ -106,6 +146,75 @@ describe("QueueCraftLambdaProcessor", () => {
     expect(run).toHaveBeenCalledTimes(1);
     expect(test.handler).toHaveBeenCalledTimes(1);
     expect(test.markComplete).toHaveBeenCalledWith(lease);
+  });
+
+  it("keeps concurrent Lambda records inside their own producer contexts", async () => {
+    const storage = new AsyncLocalStorage<string>();
+    const traceContext: QueueCraftTraceContextPropagation = {
+      inject: () => ({ traceparent: TRACEPARENT }),
+      run: (carrier, operation) =>
+        storage.run(carrier.traceparent, operation),
+    };
+    const test = harness("acquired", undefined, traceContext);
+    const firstBase = record("first-message");
+    const secondBase = record("second-message");
+    const first: LambdaSqsRecord = {
+      ...firstBase,
+      messageAttributes: {
+        ...firstBase.messageAttributes,
+        [IDEMPOTENCY_ATTRIBUTE]: {
+          dataType: "String",
+          stringValue: "first-job",
+        },
+        [TRACEPARENT_ATTRIBUTE]: {
+          dataType: "String",
+          stringValue: TRACEPARENT,
+        },
+        [TRACESTATE_ATTRIBUTE]: {
+          dataType: "String",
+          stringValue: "first=value",
+        },
+        baggage: {
+          dataType: "String",
+          stringValue: "customer_id=private",
+        },
+      },
+    };
+    const second: LambdaSqsRecord = {
+      ...secondBase,
+      messageAttributes: {
+        ...secondBase.messageAttributes,
+        [IDEMPOTENCY_ATTRIBUTE]: {
+          dataType: "String",
+          stringValue: "second-job",
+        },
+        [TRACEPARENT_ATTRIBUTE]: {
+          dataType: "String",
+          stringValue: SECOND_TRACEPARENT,
+        },
+      },
+    };
+    const seen = new Map<string, string | undefined>();
+    test.handler.mockImplementation(async (message) => {
+      await Promise.resolve();
+      seen.set(message.MessageId!, storage.getStore());
+      expect(
+        message.MessageAttributes?.[TRACEPARENT_ATTRIBUTE]?.StringValue,
+      ).toBe(storage.getStore());
+      expect(message.MessageAttributes).not.toHaveProperty("baggage");
+    });
+
+    await expect(
+      test.processor.process({ Records: [first, second] }),
+    ).resolves.toEqual({ batchItemFailures: [] });
+
+    expect(seen).toEqual(
+      new Map([
+        ["first-message", TRACEPARENT],
+        ["second-message", SECOND_TRACEPARENT],
+      ]),
+    );
+    expect(storage.getStore()).toBeUndefined();
   });
 
   it("does not retry successful Lambda work after instrumentation fails", async () => {
@@ -148,6 +257,29 @@ describe("QueueCraftLambdaProcessor", () => {
     const test = harness("completed", { run });
 
     await test.processor.process({ Records: [record()] });
+
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("does not restore trace context for a completed Lambda duplicate", async () => {
+    const run = vi.fn((_carrier, operation: () => Promise<void>) => operation());
+    const test = harness("completed", undefined, {
+      inject: () => ({ traceparent: TRACEPARENT }),
+      run,
+    });
+    const base = record();
+    const input: LambdaSqsRecord = {
+      ...base,
+      messageAttributes: {
+        ...base.messageAttributes,
+        [TRACEPARENT_ATTRIBUTE]: {
+          dataType: "String",
+          stringValue: TRACEPARENT,
+        },
+      },
+    };
+
+    await test.processor.process({ Records: [input] });
 
     expect(run).not.toHaveBeenCalled();
   });

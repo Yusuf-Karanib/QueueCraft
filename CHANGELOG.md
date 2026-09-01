@@ -10,6 +10,9 @@
   processors without exposing message bodies or idempotency keys.
 - Isolated instrumentation failures so they cannot run a handler twice or turn
   successful business work into an SQS retry.
+- Added opt-in W3C `traceparent` and `tracestate` propagation from publishers
+  through SQS to poller and Lambda handlers without a runtime OpenTelemetry
+  dependency or baggage propagation.
 
 ## 0.2.0 — 2026-09-01
 

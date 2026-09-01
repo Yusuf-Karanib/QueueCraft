@@ -34,13 +34,14 @@ Implemented:
 - Buffered CloudWatch application metrics with bounded dimensions
 - OpenTelemetry-compatible lifecycle tracing without payload attributes
 - Active handler tracing so instrumented database and API calls can become child spans
+- Opt-in W3C `traceparent`/`tracestate` continuation from publishers through SQS to workers
 - Loopback-only queue dashboard with privacy-redacted DLQ replay
 - Automated checks for Node.js 20 and 22
 - Public npm package: `@yusufkaranib/queuecraft`
 
 Not implemented yet:
 
-- End-to-end producer trace-carrier propagation across SQS
+- Messaging span links for batch processing and manual DLQ replay
 
 ## Why SQS?
 
@@ -151,9 +152,18 @@ not wait forever and the DynamoDB lease can eventually expire.
 QueueCraft can turn the same payload-free lifecycle events into CloudWatch
 metrics and OpenTelemetry-compatible spans:
 
-`QueueCraftActiveTracing` and the optional AWS operations dashboard are
+`QueueCraftActiveTracing`, W3C trace propagation, and the optional AWS operations dashboard are
 currently on `main` and planned for the next minor npm release. The published
-`0.2.0` package does not contain those two additions yet.
+`0.2.0` package does not contain those additions yet.
+
+For the optional OpenTelemetry example, install its API in the application:
+
+```bash
+npm install @opentelemetry/api
+```
+
+Also configure an OpenTelemetry SDK, asynchronous context manager, and W3C
+propagator. The API package by itself is a no-op.
 
 ```ts
 import { CloudWatchClient } from "@aws-sdk/client-cloudwatch";
@@ -161,7 +171,9 @@ import {
   QueueCraftActiveTracing,
   QueueCraftCloudWatchMetrics,
   QueueCraftTracingObserver,
+  QueueCraftW3CTraceContext,
 } from "@yusufkaranib/queuecraft";
+import { context, propagation, ROOT_CONTEXT } from "@opentelemetry/api";
 
 const metrics = new QueueCraftCloudWatchMetrics({
   client: new CloudWatchClient({ region: process.env.AWS_REGION }),
@@ -170,6 +182,11 @@ const metrics = new QueueCraftCloudWatchMetrics({
 });
 const tracing = new QueueCraftTracingObserver({ tracer });
 const activeTracing = new QueueCraftActiveTracing({ tracer });
+const traceContext = new QueueCraftW3CTraceContext({
+  context,
+  propagation,
+  rootContext: ROOT_CONTEXT,
+});
 
 const onEvent = (event) => {
   metrics.onEvent(event);
@@ -182,8 +199,11 @@ Pass `onEvent` to either the poller or Lambda processor. During shutdown, call
 in [`docs/observability.md`](docs/observability.md).
 
 Pass `activeTracing` as the processor's `instrumentation` option. It makes work
-started by the business handler part of the active trace context. It does not
-yet continue a producer's trace across SQS.
+started by the business handler part of the active trace context. Pass the same
+`traceContext` to `QueueCraftPublisher` and to the poller or Lambda processor to
+continue a producer's W3C parent through SQS. The application must configure
+its OpenTelemetry SDK, context manager, and W3C propagator; the API alone is a
+no-op. QueueCraft carries only `traceparent` and `tracestate`, never baggage.
 
 ## DynamoDB table requirement
 
@@ -241,7 +261,7 @@ Release steps are documented in [`docs/releasing.md`](docs/releasing.md).
 
 ## Roadmap
 
-1. Continue W3C trace context from publishers through SQS to workers.
+1. Add trace links for batch processing and explicit replay operations.
 2. Validate alarm thresholds and the operations dashboard in controlled pilots.
 3. Add application-failure alarms after metric rollups have a fixed identity.
 

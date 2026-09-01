@@ -4,7 +4,9 @@ This test proves behavior that mocked unit tests cannot prove:
 
 - a job can be published to real SQS and completed by the worker;
 - publishing the same stable key again does not run the handler twice;
-- a failing job is retried and moved by SQS to the real DLQ.
+- a failing job is retried and moved by SQS to the real DLQ;
+- W3C `traceparent` and `tracestate` attributes survive normal processing,
+  retries, and the DLQ move.
 
 ## Safety rule
 

@@ -15,6 +15,8 @@ import {
   QueueCraftPoller,
   QueueCraftPublisher,
   Semaphore,
+  TRACEPARENT_ATTRIBUTE,
+  TRACESTATE_ATTRIBUTE,
 } from "../dist/index.js";
 
 const REQUIRED_CONFIRMATION = "dedicated-queuecraft-test-stack";
@@ -37,7 +39,30 @@ const dlqUrl = required("SQS_DLQ_URL");
 const tableName = required("DYNAMODB_TABLE_NAME");
 const sqs = new SQSClient({ region });
 const dynamodb = new DynamoDBClient({ region });
-const publisher = new QueueCraftPublisher({ sqsClient: sqs, queueUrl });
+const traceCarrier = {
+  traceparent:
+    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+  tracestate: "queuecraft=integration-test",
+};
+let traceRuns = 0;
+const traceContext = {
+  inject: () => traceCarrier,
+  run(carrier, operation) {
+    if (
+      carrier.traceparent !== traceCarrier.traceparent ||
+      carrier.tracestate !== traceCarrier.tracestate
+    ) {
+      throw new Error("SQS did not preserve the W3C trace carrier.");
+    }
+    traceRuns += 1;
+    return operation();
+  },
+};
+const publisher = new QueueCraftPublisher({
+  sqsClient: sqs,
+  queueUrl,
+  traceContext,
+});
 const runId = `${Date.now()}-${crypto.randomUUID()}`;
 const successKey = `queuecraft-aws-success-${runId}`;
 const failureKey = `queuecraft-aws-failure-${runId}`;
@@ -98,6 +123,7 @@ function createPoller(handler) {
       shutdownTimeoutMs: 2_000,
     },
     handler,
+    traceContext,
     onError: () => undefined,
   });
 }
@@ -126,7 +152,11 @@ async function waitForDlqMessage(key) {
         MaxNumberOfMessages: 10,
         WaitTimeSeconds: 1,
         VisibilityTimeout: 1,
-        MessageAttributeNames: [IDEMPOTENCY_ATTRIBUTE],
+        MessageAttributeNames: [
+          IDEMPOTENCY_ATTRIBUTE,
+          TRACEPARENT_ATTRIBUTE,
+          TRACESTATE_ATTRIBUTE,
+        ],
       }),
     );
     const match = result.Messages?.find(
@@ -134,6 +164,14 @@ async function waitForDlqMessage(key) {
         message.MessageAttributes?.[IDEMPOTENCY_ATTRIBUTE]?.StringValue === key,
     );
     if (!match?.ReceiptHandle) return undefined;
+    if (
+      match.MessageAttributes?.[TRACEPARENT_ATTRIBUTE]?.StringValue !==
+        traceCarrier.traceparent ||
+      match.MessageAttributes?.[TRACESTATE_ATTRIBUTE]?.StringValue !==
+        traceCarrier.tracestate
+    ) {
+      throw new Error("The DLQ did not preserve the W3C trace carrier.");
+    }
     await sqs.send(
       new DeleteMessageCommand({
         QueueUrl: dlqUrl,
@@ -206,11 +244,20 @@ try {
   await stopPoller(activePoller, activeStart);
   activePoller = undefined;
   activeStart = undefined;
-  if (failedRuns < 1) throw new Error("The failure handler did not run.");
+  if (failedRuns < 2) {
+    throw new Error(`Expected at least two failed attempts, got ${failedRuns}.`);
+  }
+  const handlerRuns = successfulRuns + failedRuns;
+  if (traceRuns !== handlerRuns) {
+    throw new Error(
+      `Expected trace context on all ${handlerRuns} handler runs, got ${traceRuns}.`,
+    );
+  }
 
   console.log("PASS: real SQS publish and worker completion");
   console.log("PASS: DynamoDB-backed duplicate suppression");
   console.log("PASS: SQS retry and DLQ redrive");
+  console.log("PASS: W3C trace context survived SQS processing and DLQ redrive");
 } finally {
   if (activePoller && activeStart) {
     await stopPoller(activePoller, activeStart).catch(() => undefined);
