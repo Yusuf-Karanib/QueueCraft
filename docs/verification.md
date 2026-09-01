@@ -1,5 +1,33 @@
 # Verification record
 
+## 2026-09-01 — public operations and trace-context release
+
+Source commit and tag: `03d2f6b` / `v0.3.0`
+
+GitHub Actions runs:
+
+- [CI `33517614065`](https://github.com/Yusuf-Karanib/QueueCraft/actions/runs/33517614065)
+- [AWS integration `33517614059`](https://github.com/Yusuf-Karanib/QueueCraft/actions/runs/33517614059)
+- [trusted npm publish `33518234087`](https://github.com/Yusuf-Karanib/QueueCraft/actions/runs/33518234087)
+
+Disposable AWS stack: `queuecraft-ci-33517614059-1` in `eu-central-1`
+
+Verified behavior:
+
+- PASS: all 73 tests, type checking, building, package inspection, public ESM
+  import, and the production-dependency audit passed;
+- PASS: the real AWS test covered successful SQS processing, duplicate
+  suppression, repeated failure, DLQ redrive, and W3C trace-context survival;
+- PASS: the disposable AWS stack deletion completed successfully;
+- PASS: the version-tag-only workflow published `0.3.0` through npm trusted
+  publishing without a stored npm token;
+- PASS: the public registry reports `0.3.0` as the latest version;
+- PASS: a clean temporary install downloaded exactly `0.3.0` and imported the
+  publisher, poller, metrics, active tracing, W3C propagation, and dashboard
+  APIs;
+- PASS: the installed package has no runtime OpenTelemetry dependency;
+- PASS: no YallaQueue or production resource was used or changed.
+
 ## 2026-09-01 — W3C trace context through SQS
 
 Source commit: `5a13044`
