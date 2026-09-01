@@ -69,7 +69,7 @@ messages to the DLQ.
 npm install @yusufkaranib/queuecraft
 ```
 
-Version `0.2.0` is the current public alpha. Pin the version for controlled pilots
+Version `0.3.0` is the current public alpha. Pin the version for controlled pilots
 and review the changelog before upgrading.
 
 ## Publishing a job
@@ -152,9 +152,8 @@ not wait forever and the DynamoDB lease can eventually expire.
 QueueCraft can turn the same payload-free lifecycle events into CloudWatch
 metrics and OpenTelemetry-compatible spans:
 
-`QueueCraftActiveTracing`, W3C trace propagation, and the optional AWS operations dashboard are
-currently on `main` and planned for the next minor npm release. The published
-`0.2.0` package does not contain those additions yet.
+Version `0.3.0` includes `QueueCraftActiveTracing`, W3C trace propagation, and
+the optional AWS operations dashboard.
 
 For the optional OpenTelemetry example, install its API in the application:
 

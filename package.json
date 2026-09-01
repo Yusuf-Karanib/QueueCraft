@@ -1,6 +1,6 @@
 {
   "name": "@yusufkaranib/queuecraft",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Typed AWS SQS publishing and worker utilities",
   "type": "module",
   "main": "./dist/index.js",

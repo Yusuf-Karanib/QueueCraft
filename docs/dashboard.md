@@ -31,7 +31,7 @@ node dist/dashboard-cli.js
 Open the printed address, normally `http://127.0.0.1:4173`. Press
 `Ctrl+C` to stop it.
 
-After the npm release, the last two commands become:
+With the npm package installed globally, the last two commands become:
 
 ```powershell
 npm install --global @yusufkaranib/queuecraft

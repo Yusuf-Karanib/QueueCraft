@@ -144,9 +144,7 @@ settlement time. It does not create active context around the business handler.
 runs the business handler inside `startActiveSpan`, so instrumented database and
 API calls can become child spans.
 
-This API and the W3C propagation adapter below are currently on `main` and
-planned for the next minor npm release. They are not part of the published
-`0.2.0` package.
+This API and the W3C propagation adapter below are included in version `0.3.0`.
 
 ```ts
 import {

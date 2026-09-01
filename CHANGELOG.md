@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0 — 2026-09-01
+
 - Added an opt-in private CloudWatch operations dashboard and sustained queue
   backlog alarm.
 - Made the oldest-message alarm threshold and evaluation window configurable,
