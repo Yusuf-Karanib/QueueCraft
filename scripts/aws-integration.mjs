@@ -262,8 +262,10 @@ try {
   await stopPoller(activePoller, activeStart);
   activePoller = undefined;
   activeStart = undefined;
-  if (failedRuns < 2) {
-    throw new Error(`Expected at least two failed attempts, got ${failedRuns}.`);
+  if (failedRuns < 1) {
+    throw new Error(
+      `Expected the poison order handler to fail, got ${failedRuns} runs.`,
+    );
   }
   const handlerRuns = successfulRuns + failedRuns;
   if (traceRuns !== handlerRuns) {

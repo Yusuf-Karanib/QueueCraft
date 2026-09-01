@@ -77,7 +77,7 @@ SQS, with DynamoDB-backed duplicate suppression, retries and DLQ handling,
 CloudWatch monitoring, and W3C trace propagation.
 
 Version 0.3.0 is public on npm. I verified successful processing, duplicate
-suppression, repeated failure, DLQ redrive, and trace-context survival against
+suppression, failure handling, DLQ redrive, and trace-context survival against
 isolated real AWS resources through GitHub Actions.
 
 YallaQueue uses QueueCraft for a booking workflow. I have now added an

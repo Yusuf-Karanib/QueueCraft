@@ -14,7 +14,7 @@ The real-AWS demo:
 1. publishes a fake order with a stable source event ID;
 2. processes that order once;
 3. publishes the same event again and suppresses the duplicate;
-4. publishes a poison order that fails at least twice;
+4. publishes a poison order that fails and is delivered again by SQS;
 5. confirms SQS moved the poison order to the DLQ; and
 6. confirms W3C trace attributes survived processing and redrive.
 
