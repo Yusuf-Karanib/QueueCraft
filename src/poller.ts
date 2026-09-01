@@ -21,6 +21,10 @@ import type { WorkerOptions } from "./types";
 import type { Semaphore } from "./semaphore";
 import type { ExecutionLease, IdempotencyStore } from "./idempotency";
 import { IDEMPOTENCY_ATTRIBUTE } from "./publisher";
+import {
+  runInstrumentedJob,
+  type QueueCraftJobInstrumentation,
+} from "./instrumentation";
 
 /** SQS hard limit on messages returned per `ReceiveMessage` call. */
 const MAX_SQS_BATCH = 10;
@@ -84,6 +88,9 @@ export interface QueueCraftPollerOptions {
   /** Business logic invoked for each successfully leased message. */
   readonly handler: JobHandler;
 
+  /** Optional active-context wrapper around the business handler. */
+  readonly instrumentation?: QueueCraftJobInstrumentation;
+
   /**
    * Concurrency + polling tuning. `concurrency` MUST match the max used to
    * construct the injected Semaphore — it is the capacity ceiling this poller
@@ -107,6 +114,7 @@ export class QueueCraftPoller {
   private readonly idempotency: IdempotencyStore;
   private readonly queueUrl: string;
   private readonly handler: JobHandler;
+  private readonly instrumentation?: QueueCraftJobInstrumentation;
   private readonly onError?: (error: unknown, message?: Message) => void;
   private readonly onEvent?: (event: QueueCraftEvent) => void;
   private readonly idempotencyAttribute: string;
@@ -136,6 +144,7 @@ export class QueueCraftPoller {
     this.idempotency = options.idempotency;
     this.queueUrl = options.queueUrl;
     this.handler = options.handler;
+    this.instrumentation = options.instrumentation;
     this.onError = options.onError;
     this.onEvent = options.onEvent;
     this.idempotencyAttribute =
@@ -338,14 +347,28 @@ export class QueueCraftPoller {
     const startedAt = Date.now();
     this.reportEvent({ type: "job_started", idempotencyKey, attempt });
     let handlerError: unknown;
+    let handlerFailed = false;
 
     try {
-      await this.handler(message, {
+      const context: JobContext = {
         idempotencyKey,
         attempt,
         signal: handlerController.signal,
+      };
+      await runInstrumentedJob({
+        instrumentation: this.instrumentation,
+        context: {
+          runtime: "poller",
+          attempt,
+          signal: context.signal,
+        },
+        operation: async () => {
+          await this.handler(message, context);
+        },
+        onInstrumentationError: (error) => this.reportError(error, message),
       });
     } catch (error) {
+      handlerFailed = true;
       handlerError = error;
     } finally {
       heartbeatController.abort();
@@ -365,7 +388,7 @@ export class QueueCraftPoller {
       return;
     }
 
-    if (handlerError !== undefined) {
+    if (handlerFailed) {
       // Drop the owned lease and leave the message for SQS retry/redrive.
       await this.safeRelease(lease);
       this.reportEvent({

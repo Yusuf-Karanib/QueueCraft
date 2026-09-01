@@ -97,7 +97,7 @@ QueueCraft emits these metric names:
 | `JobsFailed` | Count | handlers that failed |
 | `JobsCancelled` | Count | jobs cancelled after lost ownership or shutdown |
 | `JobsDuplicate` | Count | duplicate jobs, split by bounded state |
-| `JobDuration` | Milliseconds | processing time, split by bounded outcome |
+| `JobDuration` | Milliseconds | QueueCraft processing time after lease acquisition, including handler and settlement work, split by bounded outcome |
 | `ShutdownTimeouts` | Count | graceful shutdown deadlines exceeded |
 | `ActiveJobsAtShutdown` | Count | active jobs at a shutdown timeout |
 | `ShutdownTimeout` | Milliseconds | configured shutdown deadline |
@@ -134,12 +134,65 @@ Job spans contain only the SQS system name, attempt, outcome, and duration.
 QueueCraft uses the idempotency key only in memory to match start and finish
 events; it never adds that key to span attributes.
 
-This adapter records QueueCraft's lifecycle. It does not automatically make
-database calls or other application work children of the QueueCraft span yet.
+This observer records the full QueueCraft lifecycle, including lease and queue
+settlement time. It does not create active context around the business handler.
+
+## Active handler tracing
+
+`QueueCraftActiveTracing` is passed as the poller or Lambda processor's
+`instrumentation` option. It uses the official OpenTelemetry tracer shape and
+runs the business handler inside `startActiveSpan`, so instrumented database and
+API calls can become child spans.
+
+This API is currently on `main` and planned for the next minor npm release. It
+is not part of the published `0.2.0` package.
+
+```ts
+import {
+  QueueCraftActiveTracing,
+  QueueCraftPoller,
+} from "@yusufkaranib/queuecraft";
+
+const activeTracing = new QueueCraftActiveTracing({
+  tracer,
+  attributes: {
+    "service.name": "booking-worker",
+    "deployment.environment": "dev",
+  },
+  onError(error) {
+    console.error("QueueCraft tracing failed", error);
+  },
+});
+
+const poller = new QueueCraftPoller({
+  // Other required options...
+  instrumentation: activeTracing,
+});
+```
+
+The active span receives only the runtime (`poller` or `lambda`), receive
+attempt, caller-supplied static attributes, outcome, and duration. The
+instrumentation context also receives the cancellation signal. It never
+receives the SQS message, idempotency key, receipt handle, queue URL, or message
+body.
+
+QueueCraft makes the real handler result authoritative. If tracing fails before
+the handler, the handler still runs once. If tracing fails after successful
+business work, QueueCraft reports the tracing error but does not release the
+lease or retry the business work.
+
+A custom `QueueCraftJobInstrumentation` implementation must invoke the provided
+operation synchronously, await it, then settle. QueueCraft prevents a second
+invocation and does not let delayed tracer cleanup block job settlement.
+
+This creates active context inside the consumer. It does not yet inject trace
+headers when publishing or extract an upstream trace from SQS. That cross-queue
+carrier needs a separate privacy and compatibility review.
 
 The CloudFormation template also creates queue-level alarms for DLQ messages
-and the age of the oldest unfinished message. These infrastructure alarms and
-the application events answer different questions:
+and the approximate age of the oldest unprocessed message. It can optionally create a sustained
+backlog alarm and private CloudWatch operations dashboard. These infrastructure
+alarms and the application events answer different questions:
 
 - SQS alarms show whether the queue is unhealthy.
 - QueueCraft events show what the worker did with each job.
@@ -147,3 +200,12 @@ the application events answer different questions:
 Application metrics and queue alarms complement each other: metrics show what
 the worker did, while alarms show whether work is building up or reaching the
 DLQ.
+
+The optional dashboard and backlog alarm default to off because CloudWatch
+charges may apply. Never publicly share the dashboard; a public link can expose
+queue activity and create additional metric-data request charges.
+
+`ApproximateAgeOfOldestMessage` is an SQS approximation, not a list of every
+ready job. Standard queues can reorder repeatedly failed messages, and a poison
+message can stop contributing to this age before SQS moves it to the DLQ. Read
+the age alarm together with the DLQ and depth measurements.

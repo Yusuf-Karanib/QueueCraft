@@ -91,12 +91,24 @@ export type {
 } from "./cloudwatch-metrics";
 
 // Vendor-neutral tracing adapter (structurally compatible with OpenTelemetry)
-export { QueueCraftTracingObserver } from "./tracing";
+export {
+  QueueCraftActiveTracing,
+  QueueCraftTracingObserver,
+} from "./tracing";
 
 export type {
+  QueueCraftActiveTracer,
+  QueueCraftActiveTracingOptions,
   QueueCraftSpanAttributes,
   QueueCraftSpanAttributeValue,
   QueueCraftTraceSpan,
   QueueCraftTracer,
   QueueCraftTracingObserverOptions,
 } from "./tracing";
+
+// Handler instrumentation contract
+export type {
+  QueueCraftJobInstrumentation,
+  QueueCraftJobInstrumentationContext,
+  QueueCraftJobRuntime,
+} from "./instrumentation";

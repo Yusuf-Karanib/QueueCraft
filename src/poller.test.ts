@@ -67,6 +67,7 @@ import { QueueCraftPoller, type JobHandler } from "./poller";
 import { IDEMPOTENCY_ATTRIBUTE } from "./publisher";
 import { Semaphore } from "./semaphore";
 import type { WorkerOptions } from "./types";
+import type { QueueCraftJobInstrumentation } from "./instrumentation";
 
 const QUEUE_URL =
   "https://sqs.me-central-1.amazonaws.com/123456789012/queuecraft-test";
@@ -96,6 +97,7 @@ function createHarness(
   handlerImpl: JobHandler,
   existingState?: (typeof LeaseState)[keyof typeof LeaseState],
   workerOverrides: Partial<WorkerOptions> = {},
+  instrumentation?: QueueCraftJobInstrumentation,
 ): Harness {
   const message: Message = {
     MessageId: "sqs-message-1",
@@ -165,6 +167,7 @@ function createHarness(
     }),
     queueUrl: QUEUE_URL,
     handler,
+    instrumentation,
     worker,
     onError,
     onEvent,
@@ -229,6 +232,54 @@ describe("QueueCraftPoller", () => {
     );
   });
 
+  it("runs a leased handler inside privacy-safe instrumentation", async () => {
+    const run = vi.fn(async (context, execute: () => Promise<void>) => {
+      expect(context).toEqual({
+        runtime: "poller",
+        attempt: 2,
+        signal: expect.any(AbortSignal),
+      });
+      expect(context).not.toHaveProperty("idempotencyKey");
+      await execute();
+    });
+    const harness = createHarness(
+      async () => undefined,
+      undefined,
+      {},
+      { run },
+    );
+
+    await runOnce(harness.poller);
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(harness.handler).toHaveBeenCalledTimes(1);
+    expect(commandsOfType(harness.sqsSend, "DeleteMessage")).toHaveLength(1);
+  });
+
+  it("does not retry successful work when instrumentation fails afterward", async () => {
+    const tracingError = new Error("span export failed");
+    const harness = createHarness(
+      async () => undefined,
+      undefined,
+      {},
+      {
+        async run(_context, execute) {
+          await execute();
+          throw tracingError;
+        },
+      },
+    );
+
+    await runOnce(harness.poller);
+
+    expect(harness.handler).toHaveBeenCalledTimes(1);
+    expect(commandsOfType(harness.sqsSend, "DeleteMessage")).toHaveLength(1);
+    expect(commandsOfType(harness.dynamoSend, "DeleteItem")).toHaveLength(0);
+    await vi.waitFor(() =>
+      expect(harness.onError).toHaveBeenCalledWith(tracingError, harness.message),
+    );
+  });
+
   it("acknowledges a completed duplicate without running the handler", async () => {
     const { poller, handler, sqsSend } = createHarness(
       async () => undefined,
@@ -239,6 +290,20 @@ describe("QueueCraftPoller", () => {
 
     expect(handler).not.toHaveBeenCalled();
     expect(commandsOfType(sqsSend, "DeleteMessage")).toHaveLength(1);
+  });
+
+  it("does not instrument a completed duplicate", async () => {
+    const run = vi.fn();
+    const harness = createHarness(
+      async () => undefined,
+      LeaseState.Completed,
+      {},
+      { run },
+    );
+
+    await runOnce(harness.poller);
+
+    expect(run).not.toHaveBeenCalled();
   });
 
   it("does not let a failing event observer crash job processing", async () => {
@@ -283,6 +348,19 @@ describe("QueueCraftPoller", () => {
       ConditionExpression: "#state = :inProgress AND #ownerId = :ownerId",
     });
     expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a rejection without a value as handler failure", async () => {
+    const harness = createHarness(async () => Promise.reject());
+
+    await runOnce(harness.poller);
+
+    expect(harness.handler).toHaveBeenCalledTimes(1);
+    expect(commandsOfType(harness.sqsSend, "DeleteMessage")).toHaveLength(0);
+    expect(commandsOfType(harness.dynamoSend, "DeleteItem")).toHaveLength(1);
+    expect(harness.onEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "job_failed" }),
+    );
   });
 
   it("renews both leases while a long-running handler is active", async () => {

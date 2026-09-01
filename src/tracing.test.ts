@@ -1,6 +1,9 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { describe, expect, it, vi } from "vitest";
 import {
+  QueueCraftActiveTracing,
   QueueCraftTracingObserver,
+  type QueueCraftActiveTracer,
   type QueueCraftSpanAttributeValue,
   type QueueCraftTraceSpan,
   type QueueCraftTracer,
@@ -30,6 +33,177 @@ function tracingHarness() {
     startSpan,
   };
 }
+
+function activeTracingHarness() {
+  const storage = new AsyncLocalStorage<TestSpan>();
+  const spans: TestSpan[] = [];
+  const startActiveSpan = vi.fn(
+    <T>(
+      _name: string,
+      options: { attributes?: object },
+      operation: (span: QueueCraftTraceSpan) => T,
+    ): T => {
+      const span: TestSpan = {
+        attributes: new Map(Object.entries(options.attributes ?? {})),
+        setAttribute(name, value) {
+          this.attributes.set(name, value);
+        },
+        end: vi.fn<() => void>(),
+      };
+      spans.push(span);
+      return storage.run(span, () => operation(span));
+    },
+  );
+  return {
+    spans,
+    storage,
+    startActiveSpan,
+    tracer: { startActiveSpan } as QueueCraftActiveTracer,
+  };
+}
+
+describe("QueueCraftActiveTracing", () => {
+  it("keeps the handler inside an active span across awaits", async () => {
+    const test = activeTracingHarness();
+    const tracing = new QueueCraftActiveTracing({
+      tracer: test.tracer,
+      attributes: { service: "booking-worker" },
+    });
+
+    await tracing.run(
+      {
+        runtime: "poller",
+        attempt: 2,
+        signal: new AbortController().signal,
+      },
+      async () => {
+        expect(test.storage.getStore()).toBe(test.spans[0]);
+        await Promise.resolve();
+        expect(test.storage.getStore()).toBe(test.spans[0]);
+      },
+    );
+
+    expect(test.startActiveSpan).toHaveBeenCalledWith(
+      "queuecraft.handler",
+      {
+        attributes: {
+          service: "booking-worker",
+          "messaging.system": "aws.sqs",
+          "messaging.operation.type": "process",
+          "queuecraft.runtime": "poller",
+          "queuecraft.attempt": 2,
+        },
+      },
+      expect.any(Function),
+    );
+    expect(JSON.stringify(test.startActiveSpan.mock.calls)).not.toContain(
+      "private-customer-reference",
+    );
+    expect(test.spans[0].attributes.get("queuecraft.outcome")).toBe(
+      "completed",
+    );
+    expect(test.spans[0].attributes.get("queuecraft.duration_ms")).toEqual(
+      expect.any(Number),
+    );
+    expect(test.spans[0].end).toHaveBeenCalledOnce();
+  });
+
+  it("rethrows the same handler error and closes the span", async () => {
+    const test = activeTracingHarness();
+    const tracing = new QueueCraftActiveTracing({ tracer: test.tracer });
+    const handlerError = new Error("booking failed");
+
+    await expect(
+      tracing.run(
+        {
+          runtime: "lambda",
+          attempt: 1,
+          signal: new AbortController().signal,
+        },
+        async () => {
+          throw handlerError;
+        },
+      ),
+    ).rejects.toBe(handlerError);
+
+    expect(test.spans[0].attributes.get("queuecraft.outcome")).toBe("failed");
+    expect(test.spans[0].end).toHaveBeenCalledOnce();
+  });
+
+  it("records cancellation from the privacy-safe signal", async () => {
+    const test = activeTracingHarness();
+    const tracing = new QueueCraftActiveTracing({ tracer: test.tracer });
+    const controller = new AbortController();
+    controller.abort();
+
+    await tracing.run(
+      { runtime: "poller", attempt: 1, signal: controller.signal },
+      async () => undefined,
+    );
+
+    expect(test.spans[0].attributes.get("queuecraft.outcome")).toBe(
+      "cancelled",
+    );
+  });
+
+  it("runs the handler if the tracer fails before activating it", async () => {
+    const tracerError = new Error("tracer unavailable");
+    const onError = vi.fn();
+    const operation = vi.fn(async () => undefined);
+    const tracing = new QueueCraftActiveTracing({
+      tracer: {
+        startActiveSpan() {
+          throw tracerError;
+        },
+      },
+      onError,
+    });
+
+    await tracing.run(
+      {
+        runtime: "poller",
+        attempt: 1,
+        signal: new AbortController().signal,
+      },
+      operation,
+    );
+
+    expect(operation).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(tracerError);
+  });
+
+  it("does not fail successful work when span cleanup fails", async () => {
+    const onError = vi.fn();
+    const tracing = new QueueCraftActiveTracing({
+      tracer: {
+        startActiveSpan(_name, _options, operation) {
+          return operation({
+            setAttribute() {
+              throw new Error("attribute failed");
+            },
+            end() {
+              throw new Error("end failed");
+            },
+          });
+        },
+      },
+      onError,
+    });
+
+    await expect(
+      tracing.run(
+        {
+          runtime: "lambda",
+          attempt: 1,
+          signal: new AbortController().signal,
+        },
+        async () => undefined,
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(onError).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe("QueueCraftTracingObserver", () => {
   it("creates and finishes a job span without exporting its stable key", () => {

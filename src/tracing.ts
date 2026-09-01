@@ -1,4 +1,8 @@
 import type { QueueCraftEvent } from "./poller";
+import type {
+  QueueCraftJobInstrumentation,
+  QueueCraftJobInstrumentationContext,
+} from "./instrumentation";
 
 export type QueueCraftSpanAttributeValue = string | number | boolean;
 export type QueueCraftSpanAttributes = Readonly<
@@ -19,6 +23,22 @@ export interface QueueCraftTracer {
   ): QueueCraftTraceSpan;
 }
 
+/** Small structural subset implemented by OpenTelemetry active tracers. */
+export interface QueueCraftActiveTracer {
+  startActiveSpan<T>(
+    name: string,
+    options: { readonly attributes?: QueueCraftSpanAttributes },
+    operation: (span: QueueCraftTraceSpan) => T,
+  ): T;
+}
+
+export interface QueueCraftActiveTracingOptions {
+  readonly tracer: QueueCraftActiveTracer;
+  readonly spanName?: string;
+  readonly attributes?: QueueCraftSpanAttributes;
+  readonly onError?: (error: unknown) => void;
+}
+
 export interface QueueCraftTracingObserverOptions {
   readonly tracer: QueueCraftTracer;
   readonly spanName?: string;
@@ -28,6 +48,97 @@ export interface QueueCraftTracingObserverOptions {
 
 interface ActiveSpan {
   readonly span: QueueCraftTraceSpan;
+}
+
+/**
+ * Runs a business handler inside an active span so its instrumented database
+ * and API calls can become children of that span.
+ */
+export class QueueCraftActiveTracing implements QueueCraftJobInstrumentation {
+  private readonly tracer: QueueCraftActiveTracer;
+  private readonly spanName: string;
+  private readonly attributes: QueueCraftSpanAttributes;
+  private readonly onError?: (error: unknown) => void;
+
+  constructor(options: QueueCraftActiveTracingOptions) {
+    this.tracer = options.tracer;
+    this.spanName = options.spanName ?? "queuecraft.handler";
+    this.attributes = options.attributes ?? {};
+    this.onError = options.onError;
+
+    if (!this.spanName.trim()) {
+      throw new RangeError("spanName must be non-empty.");
+    }
+  }
+
+  async run(
+    context: QueueCraftJobInstrumentationContext,
+    operation: () => Promise<void>,
+  ): Promise<void> {
+    let operationEntered = false;
+    try {
+      await this.tracer.startActiveSpan(
+        this.spanName,
+        {
+          attributes: {
+            ...this.attributes,
+            "messaging.system": "aws.sqs",
+            "messaging.operation.type": "process",
+            "queuecraft.runtime": context.runtime,
+            "queuecraft.attempt": context.attempt,
+          },
+        },
+        async (span) => {
+          operationEntered = true;
+          const startedAt = Date.now();
+          let outcome = "failed";
+          try {
+            await operation();
+            outcome = context.signal.aborted ? "cancelled" : "completed";
+          } catch (error) {
+            outcome = context.signal.aborted ? "cancelled" : "failed";
+            throw error;
+          } finally {
+            this.finishSpan(span, outcome, Date.now() - startedAt);
+          }
+        },
+      );
+    } catch (error) {
+      if (!operationEntered) {
+        this.reportError(error);
+        await operation();
+        return;
+      }
+      throw error;
+    }
+  }
+
+  private finishSpan(
+    span: QueueCraftTraceSpan,
+    outcome: string,
+    durationMs: number,
+  ): void {
+    try {
+      span.setAttribute("queuecraft.outcome", outcome);
+      span.setAttribute("queuecraft.duration_ms", durationMs);
+    } catch (error) {
+      this.reportError(error);
+    } finally {
+      try {
+        span.end();
+      } catch (error) {
+        this.reportError(error);
+      }
+    }
+  }
+
+  private reportError(error: unknown): void {
+    try {
+      this.onError?.(error);
+    } catch {
+      // Tracing callbacks must never change handler behavior.
+    }
+  }
 }
 
 /**

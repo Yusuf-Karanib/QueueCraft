@@ -9,12 +9,14 @@ The CloudFormation template creates the first real QueueCraft environment:
 - One worker IAM policy
 - One local dashboard IAM policy
 - One dead-letter queue alarm
-- One alarm for jobs that remain unfinished for more than five minutes
-- An optional encrypted SNS topic and email subscription for that alarm
+- One configurable alarm for the approximate age of the oldest unprocessed message
+- One optional sustained visible-backlog alarm
+- One optional private CloudWatch operations dashboard
+- An optional SNS topic and email subscription for the alarms
 
-The queue and table use AWS-managed encryption. DynamoDB starts at five provisioned
-read and write units so a small batch does not immediately throttle while the pilot
-can remain inside the standard free allowance.
+The queue and table use AWS-managed encryption. DynamoDB starts at five
+provisioned read and write units so a small batch does not immediately throttle.
+Those units may be billable depending on the account's other usage.
 Paid point-in-time recovery is disabled by default.
 
 ## Important boundary
@@ -33,10 +35,17 @@ explained in [`../docs/aws-ci.md`](../docs/aws-ci.md).
 3. Upload `cloudformation.yaml`.
 4. Keep `Environment` set to `dev` for the first test.
 5. Set `AlarmEmail` to the person responsible for failed jobs.
-6. Acknowledge that the stack creates IAM resources.
-7. Create the stack and wait for `CREATE_COMPLETE`.
-8. Confirm the subscription from the email AWS sends.
-9. Open the stack's **Outputs** tab.
+6. Keep `EnableOperationsDashboard` and `EnableJobQueueDepthAlarm` set to
+   `false` unless you want those optional CloudWatch resources.
+7. Set `JobQueueAgeAlarmThresholdSeconds`,
+   `JobQueueAgeAlarmEvaluationPeriods`, and the optional depth threshold to
+   match the business's normal throughput. The default age alarm requires the
+   five-minute threshold to remain breached for 15 consecutive one-minute
+   periods before it fires.
+8. Acknowledge that the stack creates IAM resources.
+9. Create the stack and wait for `CREATE_COMPLETE`.
+10. Confirm the subscription from the email AWS sends.
+11. Open the stack's **Outputs** tab.
 
 The important outputs are:
 
@@ -49,10 +58,42 @@ The important outputs are:
 - `DashboardPolicyArn`
 - `DeadLetterAlarmName`
 - `JobQueueAgeAlarmName`
+- `JobQueueAgeAlarmThresholdSeconds`
+- `JobQueueAgeAlarmEvaluationPeriods`
+- `JobQueueDepthAlarmName` and `JobQueueDepthAlarmThresholdMessages` when the
+  depth alarm is enabled
+- `OperationsDashboardName` when the dashboard is enabled
 - `AlarmTopicArn` when an alarm email was provided
 
 Creating the resources does not start a worker. A separate consumer, such as an
 SQS-triggered Lambda function, must use the queue and table outputs.
+
+## Optional operations view
+
+`EnableOperationsDashboard=true` creates a private CloudWatch dashboard for:
+
+- ready, in-flight, delayed, and dead-letter message counts;
+- the oldest unprocessed-message age and its alarm threshold;
+- QueueCraft worker outcomes; and
+- average QueueCraft processing duration by outcome.
+
+Worker graphs stay empty until an application sends QueueCraft custom metrics
+to the stack's `MetricsNamespace`. CloudWatch searches only find custom metrics
+that have reported data recently.
+
+Do not publicly share this dashboard. Public links expose queue activity and can
+create `GetMetricData` charges. Dashboards, alarms, custom metrics, and metric
+dimension combinations may also be billed. The DLQ and age alarms are always
+created. The extra dashboard and backlog alarm default to `false` so the
+operator makes that additional cost decision explicitly.
+
+The optional SNS topic is not encrypted at rest by default. CloudWatch alarm
+delivery through an encrypted SNS topic requires a customer-managed KMS key
+whose policy permits the CloudWatch service; the AWS-managed SNS key cannot be
+given that policy. QueueCraft alarm descriptions never include message bodies
+or customer fields. If your policy requires SNS encryption, configure a
+customer-managed key by following AWS's
+[SNS key-management guidance](https://docs.aws.amazon.com/sns/latest/dg/sns-key-management.html).
 
 ## Queue choice
 

@@ -4,6 +4,10 @@ import type { ExecutionLease, IdempotencyStore } from "./idempotency";
 import type { JobContext, JobHandler, QueueCraftEvent } from "./poller";
 import { IDEMPOTENCY_ATTRIBUTE } from "./publisher";
 import { Semaphore } from "./semaphore";
+import {
+  runInstrumentedJob,
+  type QueueCraftJobInstrumentation,
+} from "./instrumentation";
 
 export interface LambdaSqsMessageAttribute {
   readonly dataType: string;
@@ -36,6 +40,7 @@ export interface LambdaSqsBatchResponse {
 export interface QueueCraftLambdaProcessorOptions {
   readonly idempotency: IdempotencyStore;
   readonly handler: JobHandler;
+  readonly instrumentation?: QueueCraftJobInstrumentation;
   readonly concurrency?: number;
   readonly idempotencyAttribute?: string;
   readonly onError?: (error: unknown, record?: LambdaSqsRecord) => void;
@@ -54,6 +59,7 @@ export interface LambdaProcessOptions {
 export class QueueCraftLambdaProcessor {
   private readonly idempotency: IdempotencyStore;
   private readonly handler: JobHandler;
+  private readonly instrumentation?: QueueCraftJobInstrumentation;
   private readonly semaphore: Semaphore;
   private readonly idempotencyAttribute: string;
   private readonly onError?: (
@@ -66,6 +72,7 @@ export class QueueCraftLambdaProcessor {
     const concurrency = options.concurrency ?? 10;
     this.idempotency = options.idempotency;
     this.handler = options.handler;
+    this.instrumentation = options.instrumentation;
     this.semaphore = new Semaphore(concurrency);
     this.idempotencyAttribute =
       options.idempotencyAttribute ?? IDEMPOTENCY_ATTRIBUTE;
@@ -152,8 +159,20 @@ export class QueueCraftLambdaProcessor {
         signal,
       };
 
-      await this.handler(message, context);
-      handlerReturned = true;
+      await runInstrumentedJob({
+        instrumentation: this.instrumentation,
+        context: {
+          runtime: "lambda",
+          attempt,
+          signal: context.signal,
+        },
+        operation: async () => {
+          await this.handler(message, context);
+          handlerReturned = true;
+        },
+        onInstrumentationError: (instrumentationError) =>
+          this.reportError(instrumentationError, record),
+      });
 
       if (signal.aborted) {
         throw new Error("Lambda invocation is ending before job completion.");

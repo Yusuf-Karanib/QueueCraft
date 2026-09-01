@@ -27,19 +27,20 @@ Implemented:
 - DynamoDB execution leases and completed-job duplicate suppression
 - SQS visibility and DynamoDB lease heartbeats for long jobs
 - Bounded graceful shutdown with handler cancellation
-- CloudFormation for a standard queue, DLQ, DynamoDB table, IAM policies, and alarms
+- CloudFormation for a standard queue, DLQ, DynamoDB table, IAM policies, alarms, and an optional private operations dashboard
 - Guarded integration runner verified against real SQS and DynamoDB
 - Automated isolated AWS integration tests with short-lived GitHub OIDC credentials
 - Structured, payload-free lifecycle events for logs and metrics
 - Buffered CloudWatch application metrics with bounded dimensions
 - OpenTelemetry-compatible lifecycle tracing without payload attributes
+- Active handler tracing so instrumented database and API calls can become child spans
 - Loopback-only queue dashboard with privacy-redacted DLQ replay
 - Automated checks for Node.js 20 and 22
 - Public npm package: `@yusufkaranib/queuecraft`
 
 Not implemented yet:
 
-- Automatic trace-context propagation into application handlers and outbound calls
+- End-to-end producer trace-carrier propagation across SQS
 
 ## Why SQS?
 
@@ -128,7 +129,12 @@ const poller = new QueueCraftPoller({
     await processJob(job, context.signal);
   },
   onError: (error) => console.error(error),
-  onEvent: (event) => console.log(JSON.stringify(event)),
+  onEvent: (event) => {
+    const safeEvent = "idempotencyKey" in event
+      ? { ...event, idempotencyKey: "[redacted]" }
+      : event;
+    console.log(JSON.stringify(safeEvent));
+  },
 });
 
 await poller.start();
@@ -145,9 +151,14 @@ not wait forever and the DynamoDB lease can eventually expire.
 QueueCraft can turn the same payload-free lifecycle events into CloudWatch
 metrics and OpenTelemetry-compatible spans:
 
+`QueueCraftActiveTracing` and the optional AWS operations dashboard are
+currently on `main` and planned for the next minor npm release. The published
+`0.2.0` package does not contain those two additions yet.
+
 ```ts
 import { CloudWatchClient } from "@aws-sdk/client-cloudwatch";
 import {
+  QueueCraftActiveTracing,
   QueueCraftCloudWatchMetrics,
   QueueCraftTracingObserver,
 } from "@yusufkaranib/queuecraft";
@@ -158,6 +169,7 @@ const metrics = new QueueCraftCloudWatchMetrics({
   dimensions: { Service: "booking-worker" },
 });
 const tracing = new QueueCraftTracingObserver({ tracer });
+const activeTracing = new QueueCraftActiveTracing({ tracer });
 
 const onEvent = (event) => {
   metrics.onEvent(event);
@@ -168,6 +180,10 @@ const onEvent = (event) => {
 Pass `onEvent` to either the poller or Lambda processor. During shutdown, call
 `await metrics.close()` and `tracing.close()`. Full setup and privacy limits are
 in [`docs/observability.md`](docs/observability.md).
+
+Pass `activeTracing` as the processor's `instrumentation` option. It makes work
+started by the business handler part of the active trace context. It does not
+yet continue a producer's trace across SQS.
 
 ## DynamoDB table requirement
 
@@ -203,6 +219,9 @@ The template and beginner deployment instructions are in
 [`infrastructure/`](infrastructure/README.md). The template creates a standard
 queue, DLQ, DynamoDB lease table, separate least-privilege publisher and worker
 policies, and CloudWatch alarms.
+The operations dashboard and sustained backlog alarm are opt-in so deploying
+the default template does not silently add those two resources or their
+possible CloudWatch charges.
 
 See [`docs/observability.md`](docs/observability.md) for safe event logging and
 suggested metrics. See
@@ -222,9 +241,9 @@ Release steps are documented in [`docs/releasing.md`](docs/releasing.md).
 
 ## Roadmap
 
-1. Add trace-context propagation and a sample CloudWatch dashboard.
-2. Gather feedback from controlled pilots using the public alpha.
-3. Publish future versions through npm trusted publishing with provenance.
+1. Continue W3C trace context from publishers through SQS to workers.
+2. Validate alarm thresholds and the operations dashboard in controlled pilots.
+3. Add application-failure alarms after metric rollups have a fixed identity.
 
 ## License
 

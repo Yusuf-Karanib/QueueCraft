@@ -238,6 +238,21 @@ declare class IdempotencyStore {
     private assertIdentifier;
 }
 
+type QueueCraftJobRuntime = "poller" | "lambda";
+/** Privacy-safe information available to handler instrumentation. */
+interface QueueCraftJobInstrumentationContext {
+    readonly runtime: QueueCraftJobRuntime;
+    readonly attempt: number;
+    readonly signal: AbortSignal;
+}
+/**
+ * Optional wrapper for running a business handler inside an active context.
+ * Implementations must invoke `operation` synchronously, await it, then settle.
+ */
+interface QueueCraftJobInstrumentation {
+    run(context: QueueCraftJobInstrumentationContext, operation: () => Promise<void>): Promise<void> | void;
+}
+
 /**
  * QueueCraft — core polling engine
  *
@@ -294,6 +309,8 @@ interface QueueCraftPollerOptions {
     readonly queueUrl: string;
     /** Business logic invoked for each successfully leased message. */
     readonly handler: JobHandler;
+    /** Optional active-context wrapper around the business handler. */
+    readonly instrumentation?: QueueCraftJobInstrumentation;
     /**
      * Concurrency + polling tuning. `concurrency` MUST match the max used to
      * construct the injected Semaphore — it is the capacity ceiling this poller
@@ -313,6 +330,7 @@ declare class QueueCraftPoller {
     private readonly idempotency;
     private readonly queueUrl;
     private readonly handler;
+    private readonly instrumentation?;
     private readonly onError?;
     private readonly onEvent?;
     private readonly idempotencyAttribute;
@@ -393,6 +411,7 @@ interface LambdaSqsBatchResponse {
 interface QueueCraftLambdaProcessorOptions {
     readonly idempotency: IdempotencyStore;
     readonly handler: JobHandler;
+    readonly instrumentation?: QueueCraftJobInstrumentation;
     readonly concurrency?: number;
     readonly idempotencyAttribute?: string;
     readonly onError?: (error: unknown, record?: LambdaSqsRecord) => void;
@@ -409,6 +428,7 @@ interface LambdaProcessOptions {
 declare class QueueCraftLambdaProcessor {
     private readonly idempotency;
     private readonly handler;
+    private readonly instrumentation?;
     private readonly semaphore;
     private readonly idempotencyAttribute;
     private readonly onError?;
@@ -505,11 +525,37 @@ interface QueueCraftTracer {
         readonly attributes?: QueueCraftSpanAttributes;
     }): QueueCraftTraceSpan;
 }
+/** Small structural subset implemented by OpenTelemetry active tracers. */
+interface QueueCraftActiveTracer {
+    startActiveSpan<T>(name: string, options: {
+        readonly attributes?: QueueCraftSpanAttributes;
+    }, operation: (span: QueueCraftTraceSpan) => T): T;
+}
+interface QueueCraftActiveTracingOptions {
+    readonly tracer: QueueCraftActiveTracer;
+    readonly spanName?: string;
+    readonly attributes?: QueueCraftSpanAttributes;
+    readonly onError?: (error: unknown) => void;
+}
 interface QueueCraftTracingObserverOptions {
     readonly tracer: QueueCraftTracer;
     readonly spanName?: string;
     readonly attributes?: QueueCraftSpanAttributes;
     readonly onError?: (error: unknown) => void;
+}
+/**
+ * Runs a business handler inside an active span so its instrumented database
+ * and API calls can become children of that span.
+ */
+declare class QueueCraftActiveTracing implements QueueCraftJobInstrumentation {
+    private readonly tracer;
+    private readonly spanName;
+    private readonly attributes;
+    private readonly onError?;
+    constructor(options: QueueCraftActiveTracingOptions);
+    run(context: QueueCraftJobInstrumentationContext, operation: () => Promise<void>): Promise<void>;
+    private finishSpan;
+    private reportError;
 }
 /**
  * Converts QueueCraft lifecycle events into spans without attaching message
@@ -535,4 +581,4 @@ declare class QueueCraftTracingObserver {
     private reportError;
 }
 
-export { type AcquireLockResult, type EpochMillis, type ExecutionLease, IDEMPOTENCY_ATTRIBUTE, IdempotencyStore, type IdempotencyStoreOptions, type Job, type JobContext, type JobHandler, type JobStatus, type LambdaBatchItemFailure, type LambdaProcessOptions, type LambdaSqsBatchResponse, type LambdaSqsEvent, type LambdaSqsMessageAttribute, type LambdaSqsRecord, LeaseState, type PublishOptions, type PublishResult, type QueueCraftCloudWatchClient, type QueueCraftCloudWatchMetricMappingOptions, QueueCraftCloudWatchMetrics, type QueueCraftCloudWatchMetricsOptions, type QueueCraftConfig, type QueueCraftDashboard, type QueueCraftDashboardOptions, type QueueCraftEvent, QueueCraftLambdaProcessor, type QueueCraftLambdaProcessorOptions, QueueCraftPoller, type QueueCraftPollerOptions, QueueCraftPublisher, type QueueCraftPublisherOptions, type QueueCraftSpanAttributeValue, type QueueCraftSpanAttributes, type QueueCraftTraceSpan, type QueueCraftTracer, QueueCraftTracingObserver, type QueueCraftTracingObserverOptions, Semaphore, type WorkerOptions, createQueueCraftDashboard, mapQueueCraftEventToCloudWatchMetrics };
+export { type AcquireLockResult, type EpochMillis, type ExecutionLease, IDEMPOTENCY_ATTRIBUTE, IdempotencyStore, type IdempotencyStoreOptions, type Job, type JobContext, type JobHandler, type JobStatus, type LambdaBatchItemFailure, type LambdaProcessOptions, type LambdaSqsBatchResponse, type LambdaSqsEvent, type LambdaSqsMessageAttribute, type LambdaSqsRecord, LeaseState, type PublishOptions, type PublishResult, type QueueCraftActiveTracer, QueueCraftActiveTracing, type QueueCraftActiveTracingOptions, type QueueCraftCloudWatchClient, type QueueCraftCloudWatchMetricMappingOptions, QueueCraftCloudWatchMetrics, type QueueCraftCloudWatchMetricsOptions, type QueueCraftConfig, type QueueCraftDashboard, type QueueCraftDashboardOptions, type QueueCraftEvent, type QueueCraftJobInstrumentation, type QueueCraftJobInstrumentationContext, type QueueCraftJobRuntime, QueueCraftLambdaProcessor, type QueueCraftLambdaProcessorOptions, QueueCraftPoller, type QueueCraftPollerOptions, QueueCraftPublisher, type QueueCraftPublisherOptions, type QueueCraftSpanAttributeValue, type QueueCraftSpanAttributes, type QueueCraftTraceSpan, type QueueCraftTracer, QueueCraftTracingObserver, type QueueCraftTracingObserverOptions, Semaphore, type WorkerOptions, createQueueCraftDashboard, mapQueueCraftEventToCloudWatchMetrics };

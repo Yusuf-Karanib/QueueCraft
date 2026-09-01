@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { IdempotencyStore } from "./idempotency";
 import { QueueCraftLambdaProcessor, type LambdaSqsRecord } from "./lambda-processor";
 import { IDEMPOTENCY_ATTRIBUTE } from "./publisher";
+import type { QueueCraftJobInstrumentation } from "./instrumentation";
 
 const lease = { messageId: "meta-message-1", ownerId: "owner-1" };
 
@@ -20,7 +21,10 @@ function record(messageId = "sqs-message-1"): LambdaSqsRecord {
   };
 }
 
-function harness(status: "acquired" | "completed" | "in_progress" = "acquired") {
+function harness(
+  status: "acquired" | "completed" | "in_progress" = "acquired",
+  instrumentation?: QueueCraftJobInstrumentation,
+) {
   const acquireLock = vi.fn().mockResolvedValue(
     status === "acquired" ? { status, lease } : { status },
   );
@@ -37,6 +41,7 @@ function harness(status: "acquired" | "completed" | "in_progress" = "acquired") 
   const processor = new QueueCraftLambdaProcessor({
     idempotency,
     handler,
+    instrumentation,
     concurrency: 2,
     onError,
     onEvent,
@@ -82,6 +87,48 @@ describe("QueueCraftLambdaProcessor", () => {
     ]);
   });
 
+  it("runs an acquired Lambda handler inside privacy-safe instrumentation", async () => {
+    const run = vi.fn(async (context, execute: () => Promise<void>) => {
+      expect(context).toEqual({
+        runtime: "lambda",
+        attempt: 2,
+        signal: expect.any(AbortSignal),
+      });
+      expect(context).not.toHaveProperty("idempotencyKey");
+      await execute();
+    });
+    const test = harness("acquired", { run });
+
+    await expect(test.processor.process({ Records: [record()] })).resolves.toEqual({
+      batchItemFailures: [],
+    });
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(test.handler).toHaveBeenCalledTimes(1);
+    expect(test.markComplete).toHaveBeenCalledWith(lease);
+  });
+
+  it("does not retry successful Lambda work after instrumentation fails", async () => {
+    const tracingError = new Error("active context cleanup failed");
+    const test = harness("acquired", {
+      async run(_context, execute) {
+        await execute();
+        throw tracingError;
+      },
+    });
+
+    await expect(test.processor.process({ Records: [record()] })).resolves.toEqual({
+      batchItemFailures: [],
+    });
+
+    expect(test.handler).toHaveBeenCalledTimes(1);
+    expect(test.markComplete).toHaveBeenCalledWith(lease);
+    expect(test.releaseLock).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(test.onError).toHaveBeenCalledWith(tracingError, record()),
+    );
+  });
+
   it("acknowledges an already completed duplicate", async () => {
     const test = harness("completed");
 
@@ -94,6 +141,15 @@ describe("QueueCraftLambdaProcessor", () => {
       idempotencyKey: "meta-message-1",
       state: "completed",
     });
+  });
+
+  it("does not instrument a completed Lambda duplicate", async () => {
+    const run = vi.fn();
+    const test = harness("completed", { run });
+
+    await test.processor.process({ Records: [record()] });
+
+    expect(run).not.toHaveBeenCalled();
   });
 
   it("returns an in-progress duplicate for a later retry", async () => {

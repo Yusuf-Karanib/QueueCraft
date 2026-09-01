@@ -67,6 +67,82 @@ import {
   DeleteMessageCommand
 } from "@aws-sdk/client-sqs";
 import { randomUUID as randomUUID2 } from "crypto";
+
+// src/instrumentation.ts
+async function runInstrumentedJob(options) {
+  if (!options.instrumentation) {
+    await options.operation();
+    return;
+  }
+  let operationPromise;
+  let outcomePromise;
+  let operationCalls = 0;
+  const report = (error) => {
+    try {
+      options.onInstrumentationError?.(error);
+    } catch {
+    }
+  };
+  const runOperation = () => {
+    operationCalls += 1;
+    if (operationPromise) {
+      report(
+        new Error(
+          "QueueCraft instrumentation called the handler operation more than once."
+        )
+      );
+      return operationPromise;
+    }
+    operationPromise = Promise.resolve().then(options.operation);
+    outcomePromise = operationPromise.then(
+      () => ({ status: "completed" }),
+      (error) => ({ status: "failed", error })
+    );
+    return operationPromise;
+  };
+  let instrumentationResult = void 0;
+  let synchronousInstrumentationError;
+  let instrumentationFailedSynchronously = false;
+  try {
+    instrumentationResult = options.instrumentation.run(
+      options.context,
+      runOperation
+    );
+  } catch (error) {
+    instrumentationFailedSynchronously = true;
+    synchronousInstrumentationError = error;
+  }
+  if (operationCalls === 0) {
+    if (!instrumentationFailedSynchronously) {
+      report(
+        new Error(
+          "QueueCraft instrumentation did not start the handler operation synchronously."
+        )
+      );
+    }
+    runOperation();
+  }
+  if (!instrumentationFailedSynchronously) {
+    const finalOutcomePromise = outcomePromise;
+    void Promise.resolve(instrumentationResult).catch(
+      async (instrumentationError) => {
+        const finalOutcome = await finalOutcomePromise;
+        if (!(finalOutcome.status === "failed" && instrumentationError === finalOutcome.error)) {
+          report(instrumentationError);
+        }
+      }
+    );
+  }
+  const outcome = await outcomePromise;
+  if (instrumentationFailedSynchronously && !(outcome.status === "failed" && synchronousInstrumentationError === outcome.error)) {
+    report(synchronousInstrumentationError);
+  }
+  if (outcome.status === "failed") {
+    throw outcome.error;
+  }
+}
+
+// src/poller.ts
 var MAX_SQS_BATCH = 10;
 var DEFAULT_SHUTDOWN_TIMEOUT_MS = 3e4;
 var MAX_ABORT_CLEANUP_MS = 1e3;
@@ -76,6 +152,7 @@ var QueueCraftPoller = class {
   idempotency;
   queueUrl;
   handler;
+  instrumentation;
   onError;
   onEvent;
   idempotencyAttribute;
@@ -99,6 +176,7 @@ var QueueCraftPoller = class {
     this.idempotency = options.idempotency;
     this.queueUrl = options.queueUrl;
     this.handler = options.handler;
+    this.instrumentation = options.instrumentation;
     this.onError = options.onError;
     this.onEvent = options.onEvent;
     this.idempotencyAttribute = options.idempotencyAttribute ?? IDEMPOTENCY_ATTRIBUTE;
@@ -258,13 +336,27 @@ var QueueCraftPoller = class {
     const startedAt = Date.now();
     this.reportEvent({ type: "job_started", idempotencyKey, attempt });
     let handlerError;
+    let handlerFailed = false;
     try {
-      await this.handler(message, {
+      const context = {
         idempotencyKey,
         attempt,
         signal: handlerController.signal
+      };
+      await runInstrumentedJob({
+        instrumentation: this.instrumentation,
+        context: {
+          runtime: "poller",
+          attempt,
+          signal: context.signal
+        },
+        operation: async () => {
+          await this.handler(message, context);
+        },
+        onInstrumentationError: (error) => this.reportError(error, message)
       });
     } catch (error) {
+      handlerFailed = true;
       handlerError = error;
     } finally {
       heartbeatController.abort();
@@ -280,7 +372,7 @@ var QueueCraftPoller = class {
       });
       return;
     }
-    if (handlerError !== void 0) {
+    if (handlerFailed) {
       await this.safeRelease(lease);
       this.reportEvent({
         type: "job_failed",
@@ -582,6 +674,7 @@ var Semaphore = class {
 var QueueCraftLambdaProcessor = class {
   idempotency;
   handler;
+  instrumentation;
   semaphore;
   idempotencyAttribute;
   onError;
@@ -590,6 +683,7 @@ var QueueCraftLambdaProcessor = class {
     const concurrency = options.concurrency ?? 10;
     this.idempotency = options.idempotency;
     this.handler = options.handler;
+    this.instrumentation = options.instrumentation;
     this.semaphore = new Semaphore(concurrency);
     this.idempotencyAttribute = options.idempotencyAttribute ?? IDEMPOTENCY_ATTRIBUTE;
     this.onError = options.onError;
@@ -657,8 +751,19 @@ var QueueCraftLambdaProcessor = class {
         attempt,
         signal
       };
-      await this.handler(message, context);
-      handlerReturned = true;
+      await runInstrumentedJob({
+        instrumentation: this.instrumentation,
+        context: {
+          runtime: "lambda",
+          attempt,
+          signal: context.signal
+        },
+        operation: async () => {
+          await this.handler(message, context);
+          handlerReturned = true;
+        },
+        onInstrumentationError: (instrumentationError) => this.reportError(instrumentationError, record)
+      });
       if (signal.aborted) {
         throw new Error("Lambda invocation is ending before job completion.");
       }
@@ -1111,6 +1216,79 @@ function toDimensions(dimensions) {
 }
 
 // src/tracing.ts
+var QueueCraftActiveTracing = class {
+  tracer;
+  spanName;
+  attributes;
+  onError;
+  constructor(options) {
+    this.tracer = options.tracer;
+    this.spanName = options.spanName ?? "queuecraft.handler";
+    this.attributes = options.attributes ?? {};
+    this.onError = options.onError;
+    if (!this.spanName.trim()) {
+      throw new RangeError("spanName must be non-empty.");
+    }
+  }
+  async run(context, operation) {
+    let operationEntered = false;
+    try {
+      await this.tracer.startActiveSpan(
+        this.spanName,
+        {
+          attributes: {
+            ...this.attributes,
+            "messaging.system": "aws.sqs",
+            "messaging.operation.type": "process",
+            "queuecraft.runtime": context.runtime,
+            "queuecraft.attempt": context.attempt
+          }
+        },
+        async (span) => {
+          operationEntered = true;
+          const startedAt = Date.now();
+          let outcome = "failed";
+          try {
+            await operation();
+            outcome = context.signal.aborted ? "cancelled" : "completed";
+          } catch (error) {
+            outcome = context.signal.aborted ? "cancelled" : "failed";
+            throw error;
+          } finally {
+            this.finishSpan(span, outcome, Date.now() - startedAt);
+          }
+        }
+      );
+    } catch (error) {
+      if (!operationEntered) {
+        this.reportError(error);
+        await operation();
+        return;
+      }
+      throw error;
+    }
+  }
+  finishSpan(span, outcome, durationMs) {
+    try {
+      span.setAttribute("queuecraft.outcome", outcome);
+      span.setAttribute("queuecraft.duration_ms", durationMs);
+    } catch (error) {
+      this.reportError(error);
+    } finally {
+      try {
+        span.end();
+      } catch (error) {
+        this.reportError(error);
+      }
+    }
+  }
+  reportError(error) {
+    try {
+      this.onError?.(error);
+    } catch {
+    }
+  }
+};
 var QueueCraftTracingObserver = class {
   tracer;
   spanName;
@@ -1239,6 +1417,7 @@ export {
   IDEMPOTENCY_ATTRIBUTE,
   IdempotencyStore,
   LeaseState,
+  QueueCraftActiveTracing,
   QueueCraftCloudWatchMetrics,
   QueueCraftLambdaProcessor,
   QueueCraftPoller,

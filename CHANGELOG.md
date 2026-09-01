@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Added an opt-in private CloudWatch operations dashboard and sustained queue
+  backlog alarm.
+- Made the oldest-message alarm threshold and evaluation window configurable,
+  with a default of 15 consecutive one-minute breaches to reduce noise.
+- Added active OpenTelemetry-compatible handler tracing for poller and Lambda
+  processors without exposing message bodies or idempotency keys.
+- Isolated instrumentation failures so they cannot run a handler twice or turn
+  successful business work into an SQS retry.
+
 ## 0.2.0 — 2026-09-01
 
 - Added buffered CloudWatch lifecycle metrics with bounded, privacy-safe

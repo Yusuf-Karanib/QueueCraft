@@ -38,10 +38,46 @@ Parameters:
       - "false"
     Description: Enables paid continuous backups for the DynamoDB lease table.
 
+  EnableOperationsDashboard:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Creates an optional private CloudWatch operations dashboard. CloudWatch charges may apply.
+
+  JobQueueAgeAlarmThresholdSeconds:
+    Type: Number
+    Default: 300
+    MinValue: 60
+    MaxValue: 345600
+    Description: Oldest unprocessed-message age that triggers the queue age alarm.
+
+  JobQueueAgeAlarmEvaluationPeriods:
+    Type: Number
+    Default: 15
+    MinValue: 1
+    MaxValue: 60
+    Description: Consecutive one-minute periods required before the queue age alarm fires.
+
+  EnableJobQueueDepthAlarm:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Enables an optional alarm for a sustained visible-message backlog.
+
+  JobQueueDepthAlarmThresholdMessages:
+    Type: Number
+    Default: 100
+    MinValue: 1
+    Description: Visible-message count that triggers the optional backlog alarm.
+
   AlarmEmail:
     Type: String
     Default: ""
-    Description: Optional email address that receives dead-letter queue alarms. The recipient must confirm the SNS subscription.
+    Description: Optional email address that receives QueueCraft alarms. The recipient must confirm the SNS subscription.
 
 Conditions:
   PointInTimeRecoveryEnabled: !Equals
@@ -51,6 +87,12 @@ Conditions:
     - !Equals
       - !Ref AlarmEmail
       - ""
+  OperationsDashboardEnabled: !Equals
+    - !Ref EnableOperationsDashboard
+    - "true"
+  JobQueueDepthAlarmEnabled: !Equals
+    - !Ref EnableJobQueueDepthAlarm
+    - "true"
 
 Resources:
   DeadLetterQueue:
@@ -87,7 +129,6 @@ Resources:
     Condition: HasAlarmEmail
     Properties:
       TopicName: !Sub "${ProjectName}-${Environment}-alarms"
-      KmsMasterKeyId: alias/aws/sns
       Tags:
         - Key: Project
           Value: !Ref ProjectName
@@ -128,7 +169,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "${ProjectName}-${Environment}-oldest-job"
-      AlarmDescription: A QueueCraft job has remained unfinished for more than five minutes.
+      AlarmDescription: !Sub "The oldest unprocessed QueueCraft message has exceeded ${JobQueueAgeAlarmThresholdSeconds} seconds of approximate queue age."
       Namespace: AWS/SQS
       MetricName: ApproximateAgeOfOldestMessage
       Dimensions:
@@ -136,15 +177,136 @@ Resources:
           Value: !GetAtt JobQueue.QueueName
       Statistic: Maximum
       Period: 60
-      EvaluationPeriods: 1
-      DatapointsToAlarm: 1
-      Threshold: 300
+      EvaluationPeriods: !Ref JobQueueAgeAlarmEvaluationPeriods
+      DatapointsToAlarm: !Ref JobQueueAgeAlarmEvaluationPeriods
+      Threshold: !Ref JobQueueAgeAlarmThresholdSeconds
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions: !If
         - HasAlarmEmail
         - - !Ref AlarmTopic
         - !Ref AWS::NoValue
+
+  JobQueueDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: JobQueueDepthAlarmEnabled
+    Properties:
+      AlarmName: !Sub "${ProjectName}-${Environment}-visible-job-backlog"
+      AlarmDescription: !Sub "At least ${JobQueueDepthAlarmThresholdMessages} QueueCraft jobs remained visible for three minutes."
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt JobQueue.QueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: !Ref JobQueueDepthAlarmThresholdMessages
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasAlarmEmail
+        - - !Ref AlarmTopic
+        - !Ref AWS::NoValue
+
+  OperationsDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Condition: OperationsDashboardEnabled
+    Properties:
+      DashboardName: !Sub "${ProjectName}-${Environment}-${AWS::Region}-operations"
+      DashboardBody: !Sub |
+        {
+          "start": "-PT6H",
+          "periodOverride": "inherit",
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Queue depth",
+                "period": 60,
+                "stat": "Maximum",
+                "metrics": [
+                  ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${JobQueue.QueueName}", {"label": "Ready"}],
+                  ["AWS/SQS", "ApproximateNumberOfMessagesNotVisible", "QueueName", "${JobQueue.QueueName}", {"label": "In flight"}],
+                  ["AWS/SQS", "ApproximateNumberOfMessagesDelayed", "QueueName", "${JobQueue.QueueName}", {"label": "Delayed"}],
+                  ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${DeadLetterQueue.QueueName}", {"label": "Dead letter"}]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Oldest unprocessed message age",
+                "period": 60,
+                "stat": "Maximum",
+                "metrics": [
+                  ["AWS/SQS", "ApproximateAgeOfOldestMessage", "QueueName", "${JobQueue.QueueName}", {"label": "Age in seconds"}]
+                ],
+                "annotations": {
+                  "horizontal": [
+                    {"label": "Alarm threshold", "value": ${JobQueueAgeAlarmThresholdSeconds}}
+                  ]
+                },
+                "yAxis": {"left": {"min": 0}}
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Worker outcomes",
+                "period": 300,
+                "metrics": [
+                  [{"expression": "SEARCH('{\"${ProjectName}/${Environment}\"} MetricName=\"JobsCompleted\"', 'Sum', 300)", "label": "Completed", "id": "e1"}],
+                  [{"expression": "SEARCH('{\"${ProjectName}/${Environment}\"} MetricName=\"JobsFailed\"', 'Sum', 300)", "label": "Failed", "id": "e2"}],
+                  [{"expression": "SEARCH('{\"${ProjectName}/${Environment}\"} MetricName=\"JobsCancelled\"', 'Sum', 300)", "label": "Cancelled", "id": "e3"}],
+                  [{"expression": "SEARCH('{\"${ProjectName}/${Environment}\"} MetricName=\"JobsDuplicate\"', 'Sum', 300)", "label": "Duplicates", "id": "e4"}]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Average QueueCraft processing duration",
+                "period": 300,
+                "metrics": [
+                  [{"expression": "SEARCH('{\"${ProjectName}/${Environment}\",Outcome} MetricName=\"JobDuration\" Outcome=\"completed\"', 'Average', 300)", "label": "Completed", "id": "e1"}],
+                  [{"expression": "SEARCH('{\"${ProjectName}/${Environment}\",Outcome} MetricName=\"JobDuration\" Outcome=\"failed\"', 'Average', 300)", "label": "Failed", "id": "e2"}],
+                  [{"expression": "SEARCH('{\"${ProjectName}/${Environment}\",Outcome} MetricName=\"JobDuration\" Outcome=\"cancelled\"', 'Average', 300)", "label": "Cancelled", "id": "e3"}]
+                ],
+                "yAxis": {"left": {"min": 0, "label": "Milliseconds"}}
+              }
+            }
+          ]
+        }
 
   IdempotencyTable:
     Type: AWS::DynamoDB::Table
@@ -276,6 +438,24 @@ Outputs:
   JobQueueAgeAlarmName:
     Value: !Ref JobQueueAgeAlarm
 
+  JobQueueAgeAlarmThresholdSeconds:
+    Value: !Ref JobQueueAgeAlarmThresholdSeconds
+
+  JobQueueAgeAlarmEvaluationPeriods:
+    Value: !Ref JobQueueAgeAlarmEvaluationPeriods
+
+  JobQueueDepthAlarmName:
+    Condition: JobQueueDepthAlarmEnabled
+    Value: !Ref JobQueueDepthAlarm
+
+  JobQueueDepthAlarmThresholdMessages:
+    Condition: JobQueueDepthAlarmEnabled
+    Value: !Ref JobQueueDepthAlarmThresholdMessages
+
+  OperationsDashboardName:
+    Condition: OperationsDashboardEnabled
+    Value: !Ref OperationsDashboard
+
   AlarmTopicArn:
     Condition: HasAlarmEmail
     Value: !Ref AlarmTopic
@@ -289,7 +469,7 @@ Outputs:
     Value: !Sub "${ProjectName}/${Environment}"
 
   ProducerPolicyArn:
-    Description: Attach this policy only to the YallaQueue publisher identity.
+    Description: Attach this policy only to the application publisher identity.
     Value: !Ref ProducerPolicy
 
   ConsumerPolicyArn:
