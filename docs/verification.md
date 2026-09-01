@@ -1,5 +1,43 @@
 # Verification record
 
+## 2026-09-01 — operations dashboard and active handler tracing
+
+Source commit: `5254dfb`
+
+GitHub Actions runs:
+
+- [CI `33460359246`](https://github.com/Yusuf-Karanib/QueueCraft/actions/runs/33460359246)
+- [AWS integration `33460359247`](https://github.com/Yusuf-Karanib/QueueCraft/actions/runs/33460359247)
+
+Additional disposable AWS stack:
+`queuecraft-ops-verify-20260901-0543` in `eu-central-1`
+
+The manual stack enabled `EnableOperationsDashboard` and
+`EnableJobQueueDepthAlarm`. It used a 60-second age threshold with one
+evaluation period and a one-message backlog threshold.
+
+Verified behavior:
+
+- PASS: all 54 tests, type checking, building, package inspection, and the
+  production-dependency audit passed;
+- PASS: active tracing kept the handler's asynchronous database/API work inside
+  its OpenTelemetry-compatible active context without exposing message bodies
+  or idempotency keys;
+- PASS: AWS accepted and stored the opt-in dashboard with four widgets and seven
+  CloudWatch metric-search expressions;
+- PASS: the dashboard showed queue depth, approximate oldest unprocessed
+  message age, worker outcomes, and average QueueCraft processing duration;
+- PASS: AWS created healthy DLQ, oldest-job, and opt-in visible-backlog alarms
+  with the requested thresholds;
+- PASS: the guarded real SQS, DynamoDB, retry, and DLQ integration remained
+  green;
+- PASS: the manual stack deletion completed, CloudFormation then reported the
+  stack as not found, and the temporary dashboard was absent;
+- PASS: no YallaQueue or production stack was used or changed.
+
+The dashboard and visible-backlog alarm remain disabled by default so a normal
+QueueCraft deployment does not gain surprise CloudWatch resources or costs.
+
 ## 2026-09-01 — public observability release
 
 Source commit and tag: `6627e38` / `v0.2.0`
