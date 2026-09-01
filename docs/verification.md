@@ -1,5 +1,36 @@
 # Verification record
 
+## 2026-09-01 — W3C trace context through SQS
+
+Source commit: `5a13044`
+
+GitHub Actions runs:
+
+- [CI `33496094675`](https://github.com/Yusuf-Karanib/QueueCraft/actions/runs/33496094675)
+- [AWS integration `33496094865`](https://github.com/Yusuf-Karanib/QueueCraft/actions/runs/33496094865)
+
+Disposable AWS stack: `queuecraft-ci-33496094865-1` in `eu-central-1`
+
+Verified behavior:
+
+- PASS: all 73 tests, type checking, building, package inspection, public ESM
+  import, and the production-dependency audit passed;
+- PASS: the public structural interfaces accept the official OpenTelemetry API
+  without adding OpenTelemetry as a production dependency;
+- PASS: a valid lowercase W3C `traceparent` and `tracestate` crossed real SQS
+  and were active while the successful handler ran;
+- PASS: the same carrier survived at least two failed processing attempts and
+  the real SQS dead-letter redrive;
+- PASS: a duplicate job did not run its handler or restore trace context;
+- PASS: invalid carriers are ignored, propagation failures cannot change queue
+  settlement, and QueueCraft never propagates baggage;
+- PASS: the guarded AWS workflow created only its isolated queue, DLQ, and
+  DynamoDB table, then its deletion step completed successfully;
+- PASS: no YallaQueue or production resource was used or changed.
+
+This feature remains on `main` for the next deliberate minor release. The
+public npm package remains `0.2.0`; this verification did not publish it.
+
 ## 2026-09-01 — operations dashboard and active handler tracing
 
 Source commit: `5254dfb`
