@@ -9,9 +9,11 @@ web requests and into AWS SQS. It supplies the queue plumbing so an application
 can publish a job, process it with bounded concurrency, retry failures, and
 avoid repeating completed work.
 
-QueueCraft is the reusable engine. [YallaQueue](https://github.com/Yusuf-Karanib/YallaQueue)
-is its first reference application: WhatsApp booking requests are accepted
-quickly, placed on SQS, and processed in the background.
+QueueCraft is the reusable engine. It now has two different reference
+applications: [YallaQueue](https://github.com/Yusuf-Karanib/YallaQueue) for
+WhatsApp bookings and a business-neutral
+[order-processing example](examples/order-processing/README.md). The second
+example proves that QueueCraft is not tied to one application.
 
 ## Status
 
@@ -62,6 +64,24 @@ side effects. Handlers must still be safe to retry.
 
 SQS redrive policy—not QueueCraft application code—moves repeatedly failing
 messages to the DLQ.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  A[Webhook, API, or application] --> B[QueueCraft publisher]
+  B -->|job plus W3C trace context| C[Amazon SQS]
+  C --> D[QueueCraft poller or Lambda processor]
+  D --> E[Application business handler]
+  D <--> F[DynamoDB leases and completed jobs]
+  C -->|repeated failure| G[Dead-letter queue]
+  D --> H[CloudWatch events, metrics, alarms, and dashboard]
+```
+
+QueueCraft owns the reusable queue behavior. Each application still owns its
+payload rules and business action. DynamoDB reduces duplicate execution, while
+SQS remains an at-least-once system; the business handler must still be safe to
+retry.
 
 ## Install
 
@@ -245,7 +265,12 @@ possible CloudWatch charges.
 See [`docs/observability.md`](docs/observability.md) for safe event logging and
 suggested metrics. See
 [`docs/yallaqueue-reference.md`](docs/yallaqueue-reference.md) for the first
-end-to-end application built on QueueCraft.
+end-to-end application built on QueueCraft. The independent
+[`examples/order-processing`](examples/order-processing/README.md) application
+is the second reference and is exercised by the guarded real-AWS workflow.
+
+For a short case study, resume bullet, and recording script, see
+[`docs/portfolio.md`](docs/portfolio.md).
 
 ## Local dashboard
 

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added a second, business-neutral order-processing reference application with
+  strict payload validation and stable source-event idempotency keys.
+- Made the guarded real-AWS workflow verify the order example's success,
+  duplicate suppression, retries, DLQ redrive, and W3C trace propagation.
+- Added portfolio-ready architecture notes and a short demonstration script.
+
 ## 0.3.0 — 2026-09-01
 
 - Added an opt-in private CloudWatch operations dashboard and sustained queue

@@ -24,7 +24,8 @@
     "dashboard:demo": "npm run build && node scripts/dashboard-demo.mjs",
     "prepublishOnly": "npm run build",
     "test": "vitest run",
-    "test:aws": "npm run build && node scripts/aws-integration.mjs",
+    "test:aws": "npm run build && node examples/order-processing/aws-demo.mjs",
+    "demo:orders:aws": "npm run build && node examples/order-processing/aws-demo.mjs",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [

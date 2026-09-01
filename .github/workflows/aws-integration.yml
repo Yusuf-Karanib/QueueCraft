@@ -8,6 +8,7 @@ on:
       - .github/workflows/aws-integration.yml
       - infrastructure/integration-test.yaml
       - scripts/aws-integration.mjs
+      - examples/order-processing/**
       - src/**
       - test/**
       - package.json
@@ -71,7 +72,7 @@ jobs:
           echo "SQS_DLQ_URL=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query "Stacks[0].Outputs[?OutputKey=='DeadLetterQueueUrl'].OutputValue" --output text)" >> "$GITHUB_ENV"
           echo "DYNAMODB_TABLE_NAME=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query "Stacks[0].Outputs[?OutputKey=='IdempotencyTableName'].OutputValue" --output text)" >> "$GITHUB_ENV"
 
-      - name: Run guarded real-AWS test
+      - name: Run guarded order-processing demo
         env:
           QUEUECRAFT_AWS_TEST_CONFIRM: dedicated-queuecraft-test-stack
         run: npm run test:aws

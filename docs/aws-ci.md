@@ -47,9 +47,11 @@ manage IAM resources.
 - one SQS dead-letter queue;
 - one on-demand DynamoDB lease table.
 
-The workflow builds and tests QueueCraft, runs the guarded test against those
-resources, and deletes the stack even when the test fails. The stack name uses
-the GitHub run and attempt IDs, so it cannot target YallaQueue's resources.
+The workflow builds and tests QueueCraft, runs the order-processing example
+against those resources, and deletes the stack even when the example fails.
+It verifies one successful order, one duplicate event, and one poison order
+that reaches the DLQ. The stack name uses the GitHub run and attempt IDs, so it
+cannot target YallaQueue's resources.
 
 The workflow runs automatically when relevant code, tests, dependencies, or AWS
 test infrastructure change on `main`. It can also be started manually from the

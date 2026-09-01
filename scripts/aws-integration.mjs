@@ -11,13 +11,14 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import {
   IDEMPOTENCY_ATTRIBUTE,
-  IdempotencyStore,
-  QueueCraftPoller,
-  QueueCraftPublisher,
-  Semaphore,
   TRACEPARENT_ATTRIBUTE,
   TRACESTATE_ATTRIBUTE,
 } from "../dist/index.js";
+import {
+  createOrderPoller,
+  createOrderPublisher,
+  orderEventIdempotencyKey,
+} from "../examples/order-processing/order-processing.mjs";
 
 const REQUIRED_CONFIRMATION = "dedicated-queuecraft-test-stack";
 const required = (name) => {
@@ -58,14 +59,28 @@ const traceContext = {
     return operation();
   },
 };
-const publisher = new QueueCraftPublisher({
+const publisher = createOrderPublisher({
   sqsClient: sqs,
   queueUrl,
   traceContext,
 });
 const runId = `${Date.now()}-${crypto.randomUUID()}`;
-const successKey = `queuecraft-aws-success-${runId}`;
-const failureKey = `queuecraft-aws-failure-${runId}`;
+const successEventId = `aws-success-${runId}`;
+const failureEventId = `aws-failure-${runId}`;
+const successKey = orderEventIdempotencyKey(successEventId);
+const failureKey = orderEventIdempotencyKey(failureEventId);
+const successfulOrder = {
+  type: "order.created",
+  orderId: `ORDER-${runId}`,
+  currency: "AED",
+  items: [{ sku: "DEMO-ITEM", quantity: 2, unitPriceCents: 1_500 }],
+};
+const poisonOrder = {
+  type: "order.created",
+  orderId: `FAIL-${runId}`,
+  currency: "AED",
+  items: [{ sku: "POISON-ITEM", quantity: 1, unitPriceCents: 500 }],
+};
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -101,20 +116,15 @@ async function assertQueueStartsEmpty(url, name) {
   }
 }
 
-function createPoller(handler) {
-  const concurrency = 1;
-  return new QueueCraftPoller({
+function createDemoPoller(fulfillOrder) {
+  return createOrderPoller({
     sqsClient: sqs,
+    dynamodbClient: dynamodb,
     queueUrl,
-    semaphore: new Semaphore(concurrency),
-    idempotency: new IdempotencyStore({
-      client: dynamodb,
-      tableName,
-      leaseDurationSeconds: 5,
-      recordTtlSeconds: 300,
-    }),
+    tableName,
+    fulfillOrder,
     worker: {
-      concurrency,
+      concurrency: 1,
       pollIntervalMs: 50,
       waitTimeSeconds: 1,
       batchSize: 1,
@@ -122,7 +132,10 @@ function createPoller(handler) {
       heartbeatIntervalMs: 500,
       shutdownTimeoutMs: 2_000,
     },
-    handler,
+    idempotency: {
+      leaseDurationSeconds: 5,
+      recordTtlSeconds: 300,
+    },
     traceContext,
     onError: () => undefined,
   });
@@ -198,16 +211,16 @@ try {
   await assertQueueStartsEmpty(dlqUrl, "DLQ");
 
   let successfulRuns = 0;
-  activePoller = createPoller(async (message) => {
-    const body = JSON.parse(message.Body ?? "null");
-    if (body?.runId !== runId) {
+  activePoller = createDemoPoller(async (order) => {
+    if (order.orderId !== successfulOrder.orderId) {
       throw new Error("The dedicated test queue received an unexpected job.");
     }
     successfulRuns += 1;
   });
   activeStart = activePoller.start();
-  await publisher.publish({ runId, outcome: "success" }, {
-    idempotencyKey: successKey,
+  await publisher.publishOrder({
+    eventId: successEventId,
+    order: successfulOrder,
   });
   await waitFor("the successful job to complete", async () =>
     (await readState(successKey)) === "COMPLETED",
@@ -216,10 +229,11 @@ try {
   activePoller = undefined;
   activeStart = undefined;
 
-  await publisher.publish({ runId, outcome: "duplicate" }, {
-    idempotencyKey: successKey,
+  await publisher.publishOrder({
+    eventId: successEventId,
+    order: successfulOrder,
   });
-  activePoller = createPoller(async () => {
+  activePoller = createDemoPoller(async () => {
     successfulRuns += 1;
   });
   activeStart = activePoller.start();
@@ -232,13 +246,17 @@ try {
   }
 
   let failedRuns = 0;
-  activePoller = createPoller(async () => {
+  activePoller = createDemoPoller(async (order) => {
+    if (order.orderId !== poisonOrder.orderId) {
+      throw new Error("The dedicated test queue received an unexpected job.");
+    }
     failedRuns += 1;
     throw new Error("intentional integration-test failure");
   });
   activeStart = activePoller.start();
-  await publisher.publish({ runId, outcome: "failure" }, {
-    idempotencyKey: failureKey,
+  await publisher.publishOrder({
+    eventId: failureEventId,
+    order: poisonOrder,
   });
   await waitForDlqMessage(failureKey);
   await stopPoller(activePoller, activeStart);
@@ -254,9 +272,9 @@ try {
     );
   }
 
-  console.log("PASS: real SQS publish and worker completion");
-  console.log("PASS: DynamoDB-backed duplicate suppression");
-  console.log("PASS: SQS retry and DLQ redrive");
+  console.log("PASS: fake order published to real SQS and fulfilled once");
+  console.log("PASS: duplicate order event suppressed by DynamoDB state");
+  console.log("PASS: poison order retried and moved by SQS to the DLQ");
   console.log("PASS: W3C trace context survived SQS processing and DLQ redrive");
 } finally {
   if (activePoller && activeStart) {

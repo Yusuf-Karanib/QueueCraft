@@ -1,10 +1,11 @@
 # Real AWS integration test
 
-This test proves behavior that mocked unit tests cannot prove:
+This test runs the repository's order-processing reference application and
+proves behavior that mocked unit tests cannot prove:
 
-- a job can be published to real SQS and completed by the worker;
+- a fake order can be published to real SQS and completed by the worker;
 - publishing the same stable key again does not run the handler twice;
-- a failing job is retried and moved by SQS to the real DLQ;
+- a poison order is retried and moved by SQS to the real DLQ;
 - W3C `traceparent` and `tracestate` attributes survive normal processing,
   retries, and the DLQ move.
 
@@ -45,6 +46,8 @@ $env:DYNAMODB_TABLE_NAME = "your IdempotencyTableName output"
 $env:QUEUECRAFT_AWS_TEST_CONFIRM = "dedicated-queuecraft-test-stack"
 npm run test:aws
 ```
+
+`npm run demo:orders:aws` runs the same guarded example.
 
 The test refuses to start unless both queues appear empty. It deletes its own
 DLQ message and DynamoDB records when finished. Delete the CloudFormation test
