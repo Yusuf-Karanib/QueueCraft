@@ -1,5 +1,33 @@
 # Verification record
 
+## 2026-09-01 — independent order-processing reference
+
+Source commits: `58f8a07` and `68c7a94`
+
+GitHub Actions runs:
+
+- [CI `33528239336`](https://github.com/Yusuf-Karanib/QueueCraft/actions/runs/33528239336)
+- [AWS integration `33528239353`](https://github.com/Yusuf-Karanib/QueueCraft/actions/runs/33528239353)
+
+Disposable AWS stack: `queuecraft-ci-33528239353-1` in `eu-central-1`
+
+Verified behavior:
+
+- PASS: all 83 tests, type checking, and package building passed;
+- PASS: the independent example used QueueCraft's public publisher and poller
+  APIs with strict fake-order validation and a stable source-event key;
+- PASS: a fake order was published to real SQS and its business handler ran;
+- PASS: publishing the same source event again did not run the handler twice;
+- PASS: a poison order failed and SQS redrove it to the real DLQ after repeated
+  delivery;
+- PASS: W3C `traceparent` and `tracestate` survived successful processing and
+  DLQ redrive;
+- PASS: the disposable stack deletion completed successfully;
+- PASS: no YallaQueue or production resource was used or changed.
+
+This verification changed the GitHub reference example only. The public npm
+package remains `0.3.0`; no new package version was published.
+
 ## 2026-09-01 — public operations and trace-context release
 
 Source commit and tag: `03d2f6b` / `v0.3.0`
