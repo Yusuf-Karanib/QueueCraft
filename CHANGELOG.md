@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Reframed the repository as a maintained, feature-complete portfolio project
+  and moved the safe local demo, screenshot, requirements, and AWS verification
+  evidence into the main README.
+- Improved the package description without changing the public package version.
 - Added a second, business-neutral order-processing reference application with
   strict payload validation and stable source-event idempotency keys.
 - Made the guarded real-AWS workflow verify the order example's success,

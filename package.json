@@ -1,7 +1,7 @@
 {
   "name": "@yusufkaranib/queuecraft",
   "version": "0.3.0",
-  "description": "Typed AWS SQS publishing and worker utilities",
+  "description": "Reliable TypeScript job processing for AWS SQS with DynamoDB idempotency and observability",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

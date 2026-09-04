@@ -3,6 +3,7 @@
 [![CI](https://github.com/Yusuf-Karanib/QueueCraft/actions/workflows/ci.yml/badge.svg)](https://github.com/Yusuf-Karanib/QueueCraft/actions/workflows/ci.yml)
 [![AWS integration](https://github.com/Yusuf-Karanib/QueueCraft/actions/workflows/aws-integration.yml/badge.svg)](https://github.com/Yusuf-Karanib/QueueCraft/actions/workflows/aws-integration.yml)
 [![npm](https://img.shields.io/npm/v/%40yusufkaranib%2Fqueuecraft)](https://www.npmjs.com/package/@yusufkaranib/queuecraft)
+[![license](https://img.shields.io/github/license/Yusuf-Karanib/QueueCraft)](LICENSE)
 
 QueueCraft is a TypeScript toolkit for moving slow or failure-prone work out of
 web requests and into AWS SQS. It supplies the queue plumbing so an application
@@ -17,9 +18,15 @@ example proves that QueueCraft is not tied to one application.
 
 ## Status
 
-QueueCraft is an alpha portfolio project. Its unit-tested core and AWS
-infrastructure are usable for controlled pilots, but it has not yet earned a
-production-ready claim.
+QueueCraft `0.3.0` is feature-complete for its portfolio scope and is maintained
+for documentation, dependency, security, and correctness fixes. Its unit-tested
+core and AWS infrastructure are usable for controlled pilots, but it has not
+yet earned a production-ready claim.
+
+Evidence: 83 automated tests, Node.js 20 and 22 CI, and an isolated real-AWS
+workflow covering successful processing, duplicate suppression, failure,
+dead-letter redrive, trace propagation, and stack cleanup. See the
+[verification record](docs/verification.md).
 
 Implemented:
 
@@ -41,9 +48,31 @@ Implemented:
 - Automated checks for Node.js 20 and 22
 - Public npm package: `@yusufkaranib/queuecraft`
 
-Not implemented yet:
+Deliberate limit:
 
 - Messaging span links for batch processing and manual DLQ replay
+
+## Try the demo in two minutes
+
+Requirements: Git, Node.js 20 or 22, and npm. AWS credentials are not needed.
+
+```bash
+git clone https://github.com/Yusuf-Karanib/QueueCraft.git
+cd QueueCraft
+npm ci
+npm run dashboard:demo
+```
+
+Open the local address printed in the terminal. The demo uses fake queue data,
+stays on `127.0.0.1`, and cannot change AWS resources. It shows queue health,
+redacted dead-letter messages, and guarded replay.
+
+![QueueCraft local dashboard using fake data](docs/assets/dashboard.png)
+
+For the real-cloud evidence, open the passing
+[AWS integration run](https://github.com/Yusuf-Karanib/QueueCraft/actions/runs/33528239353).
+That run created an isolated SQS queue, DLQ, and DynamoDB table, exercised the
+order example, and deleted the complete stack.
 
 ## Why SQS?
 
@@ -232,7 +261,7 @@ depend on immediate TTL deletion; lease takeover checks `leaseUntil` directly.
 
 ## Run the repository locally
 
-To work on QueueCraft itself, clone this repository and run:
+To work on QueueCraft itself, use Node.js 20 or 22 and run:
 
 ```bash
 npm ci
@@ -278,16 +307,15 @@ The dashboard shows ready, in-flight, and dead-letter counts. It can replay a
 failed standard-queue job only after a confirmation. It binds to your computer,
 keeps AWS credentials on the server, and redacts likely customer fields.
 
-![QueueCraft local dashboard](docs/assets/dashboard.png)
-
 See [`docs/dashboard.md`](docs/dashboard.md) for setup and safety limits.
 Release steps are documented in [`docs/releasing.md`](docs/releasing.md).
 
-## Roadmap
+## Maintenance scope
 
-1. Add trace links for batch processing and explicit replay operations.
-2. Validate alarm thresholds and the operations dashboard in controlled pilots.
-3. Add application-failure alarms after metric rollups have a fixed identity.
+There is no active feature roadmap. New production-facing behavior should be
+added only when a controlled pilot supplies a clear requirement and a way to
+verify it. The current maintenance focus is keeping tests, dependencies,
+documentation, and security guidance accurate.
 
 ## License
 
