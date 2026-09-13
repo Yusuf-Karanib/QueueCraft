@@ -260,6 +260,33 @@ describe("QueueCraftTracingObserver", () => {
     expect(test.spans[0].end).toHaveBeenCalledOnce();
   });
 
+  it("finishes an active span when job settlement fails", () => {
+    const test = tracingHarness();
+    const observer = new QueueCraftTracingObserver({ tracer: test.tracer });
+    observer.onEvent({
+      type: "job_started",
+      idempotencyKey: "key-1",
+      attempt: 1,
+    });
+
+    observer.onEvent({
+      type: "job_settlement_failed",
+      idempotencyKey: "key-1",
+      attempt: 1,
+      durationMs: 25,
+      stage: "delete_message",
+    });
+
+    expect(test.spans[0].attributes.get("queuecraft.outcome")).toBe(
+      "settlement_failed",
+    );
+    expect(test.spans[0].attributes.get("queuecraft.settlement_stage")).toBe(
+      "delete_message",
+    );
+    expect(test.spans[0].end).toHaveBeenCalledOnce();
+    expect(observer.activeSpanCount).toBe(0);
+  });
+
   it("ends unfinished spans when the observer closes", () => {
     const test = tracingHarness();
     const observer = new QueueCraftTracingObserver({ tracer: test.tracer });

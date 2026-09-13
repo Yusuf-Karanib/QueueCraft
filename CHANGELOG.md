@@ -1,11 +1,21 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 — 2026-09-13
 
+- Hardened the loopback dashboard against DNS rebinding, cross-site writes,
+  framing, and body disclosure, and coalesced simultaneous replay requests.
+- Added DynamoDB lease heartbeats to Lambda batch processing and made both
+  worker runtimes emit a terminal event when durable settlement fails.
+- Made poller heartbeat timing respect both SQS visibility and DynamoDB leases,
+  and rounded DynamoDB deadlines so configured leases are never shortened.
+- Bounded the CloudWatch metric backlog, exposed a dropped-data-point counter,
+  and closed tracing spans when job settlement fails.
+- Documented the required Lambda `ReportBatchItemFailures` setting and clarified
+  that the included AWS stack is for development and testing only.
 - Reframed the repository as a maintained, feature-complete portfolio project
   and moved the safe local demo, screenshot, requirements, and AWS verification
   evidence into the main README.
-- Improved the package description without changing the public package version.
+- Improved the package description and release documentation.
 - Added a second, business-neutral order-processing reference application with
   strict payload validation and stable source-event idempotency keys.
 - Made the guarded real-AWS workflow verify the order example's success,

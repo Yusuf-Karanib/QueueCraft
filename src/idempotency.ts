@@ -51,7 +51,8 @@ const DEFAULT_RECORD_TTL_SECONDS = 14 * 24 * 60 * 60;
 export class IdempotencyStore {
   private readonly client: DynamoDBClient;
   private readonly tableName: string;
-  private readonly leaseDurationSeconds: number;
+  /** Lease lifetime used by processors to choose a safe heartbeat interval. */
+  readonly leaseDurationSeconds: number;
   private readonly recordTtlSeconds: number;
   private readonly now: () => number;
 
@@ -83,8 +84,12 @@ export class IdempotencyStore {
     this.assertIdentifier(ownerId, "ownerId");
 
     for (let attempt = 0; attempt < 2; attempt++) {
-      const nowSeconds = Math.floor(this.now() / 1000);
-      const leaseUntil = nowSeconds + this.leaseDurationSeconds;
+      const nowMilliseconds = this.now();
+      const nowSeconds = Math.floor(nowMilliseconds / 1000);
+      // Round the deadline up so even an acquisition at xx:xx:xx.999 gets the
+      // full configured lease duration rather than an almost one-second lease.
+      const leaseUntil =
+        Math.ceil(nowMilliseconds / 1000) + this.leaseDurationSeconds;
 
       try {
         await this.client.send(
@@ -141,7 +146,10 @@ export class IdempotencyStore {
   }
 
   async renewLease(lease: ExecutionLease): Promise<void> {
-    const nowSeconds = Math.floor(this.now() / 1000);
+    const nowMilliseconds = this.now();
+    const nowSeconds = Math.floor(nowMilliseconds / 1000);
+    const leaseUntil =
+      Math.ceil(nowMilliseconds / 1000) + this.leaseDurationSeconds;
     await this.client.send(
       new UpdateItemCommand({
         TableName: this.tableName,
@@ -161,7 +169,7 @@ export class IdempotencyStore {
           ":inProgress": { S: LeaseState.InProgress },
           ":ownerId": { S: lease.ownerId },
           ":leaseUntil": {
-            N: String(nowSeconds + this.leaseDurationSeconds),
+            N: String(leaseUntil),
           },
           ":now": { N: String(nowSeconds) },
           ":expiresAt": {

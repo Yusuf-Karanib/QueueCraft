@@ -41,6 +41,7 @@ export interface LambdaBatchItemFailure {
 }
 
 export interface LambdaSqsBatchResponse {
+  /** Requires `ReportBatchItemFailures` on the Lambda event-source mapping. */
   readonly batchItemFailures: readonly LambdaBatchItemFailure[];
 }
 
@@ -50,6 +51,11 @@ export interface QueueCraftLambdaProcessorOptions {
   readonly instrumentation?: QueueCraftJobInstrumentation;
   readonly traceContext?: QueueCraftTraceContextExtractor;
   readonly concurrency?: number;
+  /**
+   * How often to renew the DynamoDB execution lease during a handler. Must be
+   * shorter than the store lease. Defaults to half the lease duration.
+   */
+  readonly heartbeatIntervalMs?: number;
   readonly idempotencyAttribute?: string;
   readonly onError?: (error: unknown, record?: LambdaSqsRecord) => void;
   readonly onEvent?: (event: QueueCraftEvent) => void;
@@ -70,6 +76,7 @@ export class QueueCraftLambdaProcessor {
   private readonly instrumentation?: QueueCraftJobInstrumentation;
   private readonly traceContext?: QueueCraftTraceContextExtractor;
   private readonly semaphore: Semaphore;
+  private readonly heartbeatIntervalMs: number;
   private readonly idempotencyAttribute: string;
   private readonly onError?: (
     error: unknown,
@@ -84,6 +91,18 @@ export class QueueCraftLambdaProcessor {
     this.instrumentation = options.instrumentation;
     this.traceContext = options.traceContext;
     this.semaphore = new Semaphore(concurrency);
+    const leaseDurationMs = this.idempotency.leaseDurationSeconds * 1000;
+    this.heartbeatIntervalMs =
+      options.heartbeatIntervalMs ?? Math.floor(leaseDurationMs / 2);
+    if (
+      !Number.isInteger(this.heartbeatIntervalMs) ||
+      this.heartbeatIntervalMs < 1 ||
+      this.heartbeatIntervalMs >= leaseDurationMs
+    ) {
+      throw new RangeError(
+        `heartbeatIntervalMs must be an integer between 1 and ${leaseDurationMs - 1}.`,
+      );
+    }
     this.idempotencyAttribute =
       options.idempotencyAttribute ?? IDEMPOTENCY_ATTRIBUTE;
     if (
@@ -166,7 +185,34 @@ export class QueueCraftLambdaProcessor {
     }
 
     const lease = acquisition.lease;
+    if (signal.aborted) {
+      await this.safeRelease(lease, record);
+      return false;
+    }
+
+    const handlerController = new AbortController();
+    const heartbeatController = new AbortController();
+    const forwardInvocationAbort = (): void => {
+      handlerController.abort(
+        signal.reason ?? new Error("Lambda invocation is ending."),
+      );
+    };
+    signal.addEventListener("abort", forwardInvocationAbort, { once: true });
+    if (signal.aborted) forwardInvocationAbort();
+
+    let heartbeatFailed = false;
+    const heartbeat = this.runHeartbeat(
+      lease,
+      heartbeatController.signal,
+    ).catch((error) => {
+      heartbeatFailed = true;
+      handlerController.abort(error);
+      this.reportError(error, record);
+    });
+
     let handlerReturned = false;
+    let handlerFailed = false;
+    let handlerError: unknown;
     const attempt = this.receiveCount(record);
     const startedAt = Date.now();
     this.reportEvent({ type: "job_started", idempotencyKey, attempt });
@@ -176,7 +222,7 @@ export class QueueCraftLambdaProcessor {
       const context: JobContext = {
         idempotencyKey,
         attempt,
-        signal,
+        signal: handlerController.signal,
       };
 
       await runWithQueueCraftTraceContext({
@@ -202,32 +248,103 @@ export class QueueCraftLambdaProcessor {
         onError: (traceContextError) =>
           this.reportError(traceContextError, record),
       });
+    } catch (error) {
+      handlerFailed = true;
+      handlerError = error;
+    } finally {
+      heartbeatController.abort();
+      await heartbeat;
+      signal.removeEventListener("abort", forwardInvocationAbort);
+      if (signal.aborted) forwardInvocationAbort();
+    }
 
-      if (signal.aborted) {
-        throw new Error("Lambda invocation is ending before job completion.");
-      }
-
-      await this.idempotency.markComplete(lease);
+    if (heartbeatFailed) {
       this.reportEvent({
-        type: "job_completed",
+        type: "job_cancelled",
         idempotencyKey,
         attempt,
         durationMs: Date.now() - startedAt,
       });
-      return true;
-    } catch (error) {
+      return false;
+    }
+
+    if (handlerFailed) {
       if (!handlerReturned) {
         await this.safeRelease(lease, record);
       }
       this.reportEvent({
-        type: signal.aborted ? "job_cancelled" : "job_failed",
+        type: handlerController.signal.aborted ? "job_cancelled" : "job_failed",
         idempotencyKey,
         attempt,
         durationMs: Date.now() - startedAt,
       });
+      this.reportError(handlerError, record);
+      return false;
+    }
+
+    if (handlerController.signal.aborted) {
+      this.reportEvent({
+        type: "job_cancelled",
+        idempotencyKey,
+        attempt,
+        durationMs: Date.now() - startedAt,
+      });
+      this.reportError(
+        handlerController.signal.reason ??
+          new Error("Lambda invocation is ending before job completion."),
+        record,
+      );
+      return false;
+    }
+
+    try {
+      await this.idempotency.markComplete(lease);
+    } catch (error) {
+      this.reportEvent({
+        type: "job_settlement_failed",
+        idempotencyKey,
+        attempt,
+        durationMs: Date.now() - startedAt,
+        stage: "mark_complete",
+      });
       this.reportError(error, record);
       return false;
     }
+
+    this.reportEvent({
+      type: "job_completed",
+      idempotencyKey,
+      attempt,
+      durationMs: Date.now() - startedAt,
+    });
+    return true;
+  }
+
+  private async runHeartbeat(
+    lease: ExecutionLease,
+    signal: AbortSignal,
+  ): Promise<void> {
+    while (await this.waitForHeartbeat(signal)) {
+      await this.idempotency.renewLease(lease);
+    }
+  }
+
+  private waitForHeartbeat(signal: AbortSignal): Promise<boolean> {
+    if (signal.aborted) return Promise.resolve(false);
+
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(true);
+      }, this.heartbeatIntervalMs);
+
+      const onAbort = () => {
+        clearTimeout(timeout);
+        resolve(false);
+      };
+
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
   }
 
   private toSdkMessage(record: LambdaSqsRecord): Message {

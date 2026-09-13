@@ -41,6 +41,7 @@ function harness(
   );
   const markComplete = vi.fn().mockResolvedValue(undefined);
   const releaseLock = vi.fn().mockResolvedValue(undefined);
+  const renewLease = vi.fn().mockResolvedValue(undefined);
   const handler = vi.fn().mockResolvedValue(undefined);
   const onError = vi.fn();
   const onEvent = vi.fn();
@@ -48,6 +49,8 @@ function harness(
     acquireLock,
     markComplete,
     releaseLock,
+    renewLease,
+    leaseDurationSeconds: 1,
   } as unknown as IdempotencyStore;
   const processor = new QueueCraftLambdaProcessor({
     idempotency,
@@ -64,6 +67,7 @@ function harness(
     acquireLock,
     markComplete,
     releaseLock,
+    renewLease,
     handler,
     onError,
     onEvent,
@@ -293,7 +297,7 @@ describe("QueueCraftLambdaProcessor", () => {
     expect(test.handler).not.toHaveBeenCalled();
   });
 
-  it("releases its lease and reports only the failed record", async () => {
+  it("returns the exact ReportBatchItemFailures shape for only failed records", async () => {
     const test = harness();
     test.handler
       .mockRejectedValueOnce(new Error("booking failed"))
@@ -318,6 +322,127 @@ describe("QueueCraftLambdaProcessor", () => {
         attempt: 2,
       }),
     );
+  });
+
+  it("renews the idempotency lease while a Lambda handler is active", async () => {
+    const test = harness();
+    const processor = new QueueCraftLambdaProcessor({
+      idempotency: {
+        acquireLock: test.acquireLock,
+        markComplete: test.markComplete,
+        releaseLock: test.releaseLock,
+        renewLease: test.renewLease,
+        leaseDurationSeconds: 1,
+      } as unknown as IdempotencyStore,
+      handler: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 18));
+      },
+      heartbeatIntervalMs: 5,
+    });
+
+    await expect(processor.process({ Records: [record()] })).resolves.toEqual({
+      batchItemFailures: [],
+    });
+    expect(test.renewLease).toHaveBeenCalled();
+    expect(test.markComplete).toHaveBeenCalledWith(lease);
+  });
+
+  it("aborts and refuses settlement when Lambda lease renewal fails", async () => {
+    const test = harness();
+    const renewalError = new Error("lease renewal failed");
+    test.renewLease.mockRejectedValueOnce(renewalError);
+    const handler = vi.fn(async (_message, context) => {
+      await new Promise<void>((resolve) => {
+        context.signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+    });
+    const processor = new QueueCraftLambdaProcessor({
+      idempotency: {
+        acquireLock: test.acquireLock,
+        markComplete: test.markComplete,
+        releaseLock: test.releaseLock,
+        renewLease: test.renewLease,
+        leaseDurationSeconds: 1,
+      } as unknown as IdempotencyStore,
+      handler,
+      heartbeatIntervalMs: 5,
+      onError: test.onError,
+      onEvent: test.onEvent,
+    });
+
+    await expect(processor.process({ Records: [record()] })).resolves.toEqual({
+      batchItemFailures: [{ itemIdentifier: "sqs-message-1" }],
+    });
+    expect(handler).toHaveBeenCalledOnce();
+    expect(test.markComplete).not.toHaveBeenCalled();
+    expect(test.releaseLock).not.toHaveBeenCalled();
+    expect(test.onError).toHaveBeenCalledWith(renewalError, record());
+    expect(test.onEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "job_cancelled" }),
+    );
+  });
+
+  it("treats a lease-renewal rejection without a value as ownership loss", async () => {
+    const test = harness();
+    test.renewLease.mockRejectedValueOnce(undefined);
+    const processor = new QueueCraftLambdaProcessor({
+      idempotency: {
+        acquireLock: test.acquireLock,
+        markComplete: test.markComplete,
+        releaseLock: test.releaseLock,
+        renewLease: test.renewLease,
+        leaseDurationSeconds: 1,
+      } as unknown as IdempotencyStore,
+      handler: async (_message, context) => {
+        await new Promise<void>((resolve) => {
+          context.signal.addEventListener("abort", () => resolve(), {
+            once: true,
+          });
+        });
+      },
+      heartbeatIntervalMs: 5,
+    });
+
+    await expect(processor.process({ Records: [record()] })).resolves.toEqual({
+      batchItemFailures: [{ itemIdentifier: "sqs-message-1" }],
+    });
+    expect(test.markComplete).not.toHaveBeenCalled();
+    expect(test.releaseLock).not.toHaveBeenCalled();
+  });
+
+  it("emits a terminal settlement event when Lambda completion storage fails", async () => {
+    const test = harness();
+    const settlementError = new Error("DynamoDB unavailable");
+    test.markComplete.mockRejectedValueOnce(settlementError);
+
+    await expect(test.processor.process({ Records: [record()] })).resolves.toEqual({
+      batchItemFailures: [{ itemIdentifier: "sqs-message-1" }],
+    });
+    expect(test.onEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "job_settlement_failed",
+        stage: "mark_complete",
+      }),
+    );
+    expect(test.releaseLock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a Lambda heartbeat that can outlive the idempotency lease", () => {
+    const test = harness();
+    expect(
+      () =>
+        new QueueCraftLambdaProcessor({
+          idempotency: {
+            acquireLock: test.acquireLock,
+            markComplete: test.markComplete,
+            releaseLock: test.releaseLock,
+            renewLease: test.renewLease,
+            leaseDurationSeconds: 1,
+          } as unknown as IdempotencyStore,
+          handler: test.handler,
+          heartbeatIntervalMs: 1_000,
+        }),
+    ).toThrow("heartbeatIntervalMs must be an integer between 1 and 999");
   });
 
   it("does not start work after the invocation aborts", async () => {

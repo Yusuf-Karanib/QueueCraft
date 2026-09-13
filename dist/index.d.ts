@@ -181,7 +181,8 @@ interface WorkerOptions {
     readonly visibilityTimeoutSeconds?: number;
     /**
      * How often the worker renews SQS visibility and the DynamoDB lease.
-     * Must be shorter than the visibility timeout. Defaults to half of it.
+     * Must be shorter than both the visibility timeout and the idempotency
+     * lease. Defaults to half of the shorter lease.
      */
     readonly heartbeatIntervalMs?: number;
     /**
@@ -279,7 +280,8 @@ interface IdempotencyStoreOptions {
 declare class IdempotencyStore {
     private readonly client;
     private readonly tableName;
-    private readonly leaseDurationSeconds;
+    /** Lease lifetime used by processors to choose a safe heartbeat interval. */
+    readonly leaseDurationSeconds: number;
     private readonly recordTtlSeconds;
     private readonly now;
     constructor(options: IdempotencyStoreOptions);
@@ -318,7 +320,7 @@ interface QueueCraftJobInstrumentation {
  * commits or retries each message based on the handler's outcome.
  *
  *   receive -> acquireLock -> handler
- *                              |-- ok   --> deleteMessage + markComplete
+ *                              |-- ok   --> markComplete + deleteMessage
  *                              `-- err  --> releaseLock (SQS redelivers)
  */
 
@@ -349,6 +351,12 @@ type QueueCraftEvent = {
     readonly idempotencyKey: string;
     readonly attempt: number;
     readonly durationMs: number;
+} | {
+    readonly type: "job_settlement_failed";
+    readonly idempotencyKey: string;
+    readonly attempt: number;
+    readonly durationMs: number;
+    readonly stage: "mark_complete" | "delete_message";
 } | {
     readonly type: "job_duplicate";
     readonly idempotencyKey: string;
@@ -466,6 +474,7 @@ interface LambdaBatchItemFailure {
     readonly itemIdentifier: string;
 }
 interface LambdaSqsBatchResponse {
+    /** Requires `ReportBatchItemFailures` on the Lambda event-source mapping. */
     readonly batchItemFailures: readonly LambdaBatchItemFailure[];
 }
 interface QueueCraftLambdaProcessorOptions {
@@ -474,6 +483,11 @@ interface QueueCraftLambdaProcessorOptions {
     readonly instrumentation?: QueueCraftJobInstrumentation;
     readonly traceContext?: QueueCraftTraceContextExtractor;
     readonly concurrency?: number;
+    /**
+     * How often to renew the DynamoDB execution lease during a handler. Must be
+     * shorter than the store lease. Defaults to half the lease duration.
+     */
+    readonly heartbeatIntervalMs?: number;
     readonly idempotencyAttribute?: string;
     readonly onError?: (error: unknown, record?: LambdaSqsRecord) => void;
     readonly onEvent?: (event: QueueCraftEvent) => void;
@@ -492,12 +506,15 @@ declare class QueueCraftLambdaProcessor {
     private readonly instrumentation?;
     private readonly traceContext?;
     private readonly semaphore;
+    private readonly heartbeatIntervalMs;
     private readonly idempotencyAttribute;
     private readonly onError?;
     private readonly onEvent?;
     constructor(options: QueueCraftLambdaProcessorOptions);
     process(event: LambdaSqsEvent, options?: LambdaProcessOptions): Promise<LambdaSqsBatchResponse>;
     private processRecord;
+    private runHeartbeat;
+    private waitForHeartbeat;
     private toSdkMessage;
     private receiveCount;
     private safeRelease;
@@ -539,6 +556,11 @@ interface QueueCraftCloudWatchMetricsOptions extends QueueCraftCloudWatchMetricM
     readonly maxBatchSize?: number;
     /** Maximum time metrics remain buffered. Set to 0 for manual flushing only. */
     readonly flushIntervalMs?: number;
+    /**
+     * Hard cap for queued metric data points. When an entire event does not fit,
+     * its new data points are dropped and counted by `droppedMetricCount`.
+     */
+    readonly maxPendingMetrics?: number;
     /** Optional observer for CloudWatch delivery errors. Never throws. */
     readonly onError?: (error: unknown) => void;
 }
@@ -553,12 +575,14 @@ declare class QueueCraftCloudWatchMetrics {
     private readonly namespace;
     private readonly mappingOptions;
     private readonly maxBatchSize;
+    private readonly maxPendingMetrics;
     private readonly flushIntervalMs;
     private readonly onError?;
     private readonly pending;
     private timer?;
     private activeFlush?;
     private closed;
+    private droppedMetrics;
     constructor(options: QueueCraftCloudWatchMetricsOptions);
     /** Synchronous, failure-isolated observer for `QueueCraftPoller.onEvent`. */
     readonly onEvent: (event: QueueCraftEvent) => void;
@@ -567,6 +591,8 @@ declare class QueueCraftCloudWatchMetrics {
     /** Stops the timer and flushes remaining metrics. */
     close(): Promise<void>;
     get pendingMetricCount(): number;
+    /** Total new metric data points dropped because the pending cap was full. */
+    get droppedMetricCount(): number;
     private flushPending;
     private scheduleFlush;
     private clearTimer;

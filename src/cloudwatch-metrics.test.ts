@@ -77,6 +77,26 @@ describe("CloudWatch metrics", () => {
     expect(writer.pendingMetricCount).toBe(0);
   });
 
+  it("maps settlement failure to a terminal bounded metric outcome", () => {
+    const metrics = mapQueueCraftEventToCloudWatchMetrics({
+      type: "job_settlement_failed",
+      idempotencyKey: "private-key",
+      attempt: 1,
+      durationMs: 30,
+      stage: "delete_message",
+    });
+
+    expect(metrics.map((metric) => metric.MetricName)).toEqual([
+      "JobsSettlementFailed",
+      "JobDuration",
+    ]);
+    expect(metrics[1].Dimensions).toContainEqual({
+      Name: "Outcome",
+      Value: "settlement_failed",
+    });
+    expect(JSON.stringify(metrics)).not.toContain("private-key");
+  });
+
   it("keeps a failed batch queued so an explicit retry can deliver it", async () => {
     const send = vi
       .fn()
@@ -95,6 +115,61 @@ describe("CloudWatch metrics", () => {
     expect(writer.pendingMetricCount).toBe(0);
   });
 
+  it("bounds pending metrics and drops a new event as one unit", () => {
+    const writer = new QueueCraftCloudWatchMetrics({
+      client: { send: vi.fn() } as unknown as QueueCraftCloudWatchClient,
+      maxBatchSize: 20,
+      maxPendingMetrics: 2,
+      flushIntervalMs: 0,
+    });
+
+    writer.onEvent({
+      type: "job_completed",
+      idempotencyKey: "key-1",
+      attempt: 1,
+      durationMs: 20,
+    });
+    writer.onEvent({ type: "job_started", idempotencyKey: "key-2", attempt: 1 });
+
+    expect(writer.pendingMetricCount).toBe(2);
+    expect(writer.droppedMetricCount).toBe(1);
+  });
+
+  it("stays bounded when a failed in-flight batch returns to a full queue", async () => {
+    let rejectSend!: (error: Error) => void;
+    const send = vi.fn(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSend = reject;
+        }),
+    );
+    const writer = new QueueCraftCloudWatchMetrics({
+      client: { send } as QueueCraftCloudWatchClient,
+      maxBatchSize: 2,
+      maxPendingMetrics: 2,
+      flushIntervalMs: 0,
+    });
+    writer.onEvent({
+      type: "job_completed",
+      idempotencyKey: "older",
+      attempt: 1,
+      durationMs: 10,
+    });
+    const flush = writer.flush();
+    await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
+    writer.onEvent({
+      type: "job_failed",
+      idempotencyKey: "newer",
+      attempt: 2,
+      durationMs: 20,
+    });
+    rejectSend(new Error("CloudWatch unavailable"));
+
+    await expect(flush).rejects.toThrow("CloudWatch unavailable");
+    expect(writer.pendingMetricCount).toBe(2);
+    expect(writer.droppedMetricCount).toBe(2);
+  });
+
   it("rejects reserved namespaces and unbounded batches", () => {
     const client = { send: vi.fn() } as unknown as QueueCraftCloudWatchClient;
     expect(
@@ -103,6 +178,9 @@ describe("CloudWatch metrics", () => {
     expect(
       () => new QueueCraftCloudWatchMetrics({ client, maxBatchSize: 1_001 }),
     ).toThrow("between 1 and 1000");
+    expect(
+      () => new QueueCraftCloudWatchMetrics({ client, maxPendingMetrics: 0 }),
+    ).toThrow("maxPendingMetrics must be a positive integer");
     expect(() =>
       mapQueueCraftEventToCloudWatchMetrics(
         { type: "messages_received", count: 1 },

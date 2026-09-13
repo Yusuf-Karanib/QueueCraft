@@ -183,6 +183,15 @@ export class QueueCraftTracingObserver {
             event.durationMs,
           );
           break;
+        case "job_settlement_failed":
+          this.finishJob(
+            event.idempotencyKey,
+            "settlement_failed",
+            event.attempt,
+            event.durationMs,
+            { "queuecraft.settlement_stage": event.stage },
+          );
+          break;
         case "job_duplicate":
           this.recordInstantSpan(`${this.spanName}.duplicate`, {
             "queuecraft.duplicate_state": event.state,
@@ -238,6 +247,7 @@ export class QueueCraftTracingObserver {
     outcome: string,
     attempt: number,
     durationMs: number,
+    attributes: QueueCraftSpanAttributes = {},
   ): void {
     const active = this.active.get(idempotencyKey);
     const span =
@@ -252,6 +262,13 @@ export class QueueCraftTracingObserver {
       });
 
     this.active.delete(idempotencyKey);
+    for (const [name, value] of Object.entries(attributes)) {
+      try {
+        span.setAttribute(name, value);
+      } catch (error) {
+        this.reportError(error);
+      }
+    }
     this.finishSpan(span, outcome, durationMs);
   }
 

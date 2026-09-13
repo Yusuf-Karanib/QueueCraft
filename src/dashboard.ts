@@ -11,6 +11,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { AddressInfo } from "node:net";
 
 const DEFAULT_HOST = "127.0.0.1";
@@ -49,7 +50,12 @@ interface QueueCounts {
   readonly delayed: number;
 }
 
-const html = [
+interface DashboardSecurity {
+  readonly origin: string;
+  readonly writeToken: string;
+}
+
+const htmlTemplate = [
   "<!doctype html>",
   '<html lang="en">',
   "<head>",
@@ -80,10 +86,11 @@ const html = [
   '<section class="panel"><div style="display:flex;justify-content:space-between;align-items:center"><div><div class="eyebrow">DLQ</div><h2>Failed jobs</h2></div><button id="refresh">Refresh</button></div><div id="error" class="error"></div><div id="messages"></div></section>',
   "</main>",
   "<script>",
+  "const WRITE_TOKEN=__QUEUECRAFT_WRITE_TOKEN__;",
   "const byId=(id)=>document.getElementById(id);",
   "async function request(path,options){const response=await fetch(path,options);const data=await response.json();if(!response.ok)throw new Error(data.error||'Request failed');return data}",
   "function escapeHtml(value){const node=document.createElement('div');node.textContent=String(value);return node.innerHTML}",
-  "async function replay(id,button){if(!confirm('Replay this failed job to the main queue?'))return;button.disabled=true;try{await request('/api/dlq/replay',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({messageId:id,confirm:'REPLAY'})});await load()}catch(error){byId('error').textContent=error.message}finally{button.disabled=false}}",
+  "async function replay(id,button){if(!confirm('Replay this failed job to the main queue?'))return;button.disabled=true;try{await request('/api/dlq/replay',{method:'POST',headers:{'content-type':'application/json','x-queuecraft-write-token':WRITE_TOKEN},body:JSON.stringify({messageId:id,confirm:'REPLAY'})});await load()}catch(error){byId('error').textContent=error.message}finally{button.disabled=false}}",
   "function render(messages){const root=byId('messages');if(!messages.length){root.innerHTML='<div class=\"empty\">No failed jobs.</div>';return}root.innerHTML='';for(const item of messages){const row=document.createElement('div');row.className='row';row.innerHTML='<div><strong>'+escapeHtml(item.id)+'</strong><div class=\"muted\">Receives: '+escapeHtml(item.receiveCount)+' · Sent: '+escapeHtml(item.sentAt||'unknown')+'</div><code>'+escapeHtml(item.bodyPreview)+'</code></div>';const button=document.createElement('button');button.textContent='Replay';button.onclick=()=>replay(item.id,button);row.appendChild(button);root.appendChild(row)}}",
   "async function load(){byId('error').textContent='';try{const [overview,dlq]=await Promise.all([request('/api/overview'),request('/api/dlq')]);byId('title').textContent=overview.title;byId('visible').textContent=overview.main.visible;byId('inflight').textContent=overview.main.inFlight;byId('dlq').textContent=overview.dlq.visible;render(dlq.messages)}catch(error){byId('error').textContent=error.message}}",
   "byId('refresh').onclick=load;load();setInterval(load,15000);",
@@ -114,9 +121,24 @@ export async function createQueueCraftDashboard(
   }
 
   const cache = new Map<string, CachedDlqMessage>();
+  const replayFlights = new Map<string, Promise<void>>();
+  const writeToken = randomBytes(32).toString("base64url");
+  let security: DashboardSecurity | undefined;
   const server = createServer(async (request, response) => {
     try {
-      await handleRequest(options, cache, cacheTtlMs, request, response);
+      if (!security) {
+        sendJson(response, 503, { error: "Dashboard is starting." });
+        return;
+      }
+      await handleRequest(
+        options,
+        cache,
+        replayFlights,
+        cacheTtlMs,
+        security,
+        request,
+        response,
+      );
     } catch (error) {
       try {
         options.onError?.(error);
@@ -131,13 +153,20 @@ export async function createQueueCraftDashboard(
     server.once("error", reject);
     server.listen(port, host, () => {
       server.removeListener("error", reject);
+      const address = server.address() as AddressInfo;
+      security = {
+        origin: new URL(
+          "http://" + formatAuthority(host, address.port),
+        ).origin,
+        writeToken,
+      };
       resolve();
     });
   });
 
   const address = server.address() as AddressInfo;
   return {
-    url: "http://" + host + ":" + address.port,
+    url: "http://" + formatAuthority(host, address.port),
     close: () =>
       new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
@@ -148,13 +177,48 @@ export async function createQueueCraftDashboard(
 async function handleRequest(
   options: QueueCraftDashboardOptions,
   cache: Map<string, CachedDlqMessage>,
+  replayFlights: Map<string, Promise<void>>,
   cacheTtlMs: number,
+  security: DashboardSecurity,
   request: IncomingMessage,
   response: ServerResponse,
 ): Promise<void> {
-  const url = new URL(request.url ?? "/", "http://localhost");
+  if (!isExpectedHost(request.headers.host, security.origin)) {
+    sendJson(response, 403, { error: "Invalid dashboard host." });
+    return;
+  }
+
+  const url = new URL(request.url ?? "/", security.origin);
+  if (url.origin !== security.origin) {
+    sendJson(response, 403, { error: "Invalid dashboard URL." });
+    return;
+  }
+
+  const isWrite = !["GET", "HEAD", "OPTIONS"].includes(
+    request.method ?? "",
+  );
+  if (isWrite) {
+    if (request.headers.origin !== security.origin) {
+      sendJson(response, 403, { error: "Invalid dashboard origin." });
+      return;
+    }
+    if (!hasJsonContentType(request.headers["content-type"])) {
+      sendJson(response, 415, { error: "Content-Type must be application/json." });
+      return;
+    }
+    if (
+      !matchesWriteToken(
+        request.headers["x-queuecraft-write-token"],
+        security.writeToken,
+      )
+    ) {
+      sendJson(response, 403, { error: "Invalid dashboard write token." });
+      return;
+    }
+  }
+
   if (request.method === "GET" && url.pathname === "/") {
-    sendHtml(response, html);
+    sendHtml(response, dashboardHtml(security.writeToken));
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/overview") {
@@ -182,18 +246,21 @@ async function handleRequest(
     );
     const messages = (result.Messages ?? []).flatMap((message) => {
       if (!message.MessageId || !message.ReceiptHandle) return [];
-      cache.set(message.MessageId, {
-        receiptHandle: message.ReceiptHandle,
-        body: message.Body ?? "",
-        attributes: message.MessageAttributes,
-        expiresAt: Date.now() + cacheTtlMs,
-        published: false,
-      });
+      if (!replayFlights.has(message.MessageId)) {
+        const previous = cache.get(message.MessageId);
+        cache.set(message.MessageId, {
+          receiptHandle: message.ReceiptHandle,
+          body: message.Body ?? "",
+          attributes: message.MessageAttributes,
+          expiresAt: Date.now() + cacheTtlMs,
+          published: previous?.published ?? false,
+        });
+      }
       return [{
         id: message.MessageId,
         receiveCount: Number(message.Attributes?.ApproximateReceiveCount ?? "1"),
         sentAt: formatTimestamp(message.Attributes?.SentTimestamp),
-        bodyPreview: safeBodyPreview(message.Body),
+        bodyPreview: "(message body hidden)",
       }];
     });
     sendJson(response, 200, { messages });
@@ -205,29 +272,30 @@ async function handleRequest(
       sendJson(response, 400, { error: "Replay requires messageId and confirm=REPLAY." });
       return;
     }
+    const activeReplay = replayFlights.get(body.messageId);
+    if (activeReplay) {
+      await activeReplay;
+      sendJson(response, 200, { replayed: true });
+      return;
+    }
+
     removeExpired(cache);
     const cached = cache.get(body.messageId);
     if (!cached) {
       sendJson(response, 409, { error: "Refresh the DLQ before replaying this job." });
       return;
     }
-    if (!cached.published) {
-      await options.sqsClient.send(
-        new SendMessageCommand({
-          QueueUrl: options.queueUrl,
-          MessageBody: cached.body,
-          MessageAttributes: cached.attributes,
-        }),
-      );
-      cached.published = true;
+
+    const replay = replayCachedMessage(options, cached);
+    replayFlights.set(body.messageId, replay);
+    try {
+      await replay;
+      cache.delete(body.messageId);
+    } finally {
+      if (replayFlights.get(body.messageId) === replay) {
+        replayFlights.delete(body.messageId);
+      }
     }
-    await options.sqsClient.send(
-      new DeleteMessageCommand({
-        QueueUrl: options.dlqUrl,
-        ReceiptHandle: cached.receiptHandle,
-      }),
-    );
-    cache.delete(body.messageId);
     sendJson(response, 200, { replayed: true });
     return;
   }
@@ -259,34 +327,72 @@ function removeExpired(cache: Map<string, CachedDlqMessage>): void {
   }
 }
 
-function safeBodyPreview(body: string | undefined): string {
-  if (!body) return "(empty body)";
-  try {
-    const parsed = JSON.parse(body) as unknown;
-    return truncate(JSON.stringify(redact(parsed)));
-  } catch {
-    return "(non-JSON body hidden)";
-  }
-}
-
-function redact(value: unknown, key = ""): unknown {
-  if (/phone|email|message|text|token|secret|authorization/i.test(key)) {
-    return "[redacted]";
-  }
-  if (Array.isArray(value)) return value.map((item) => redact(item));
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([childKey, childValue]) => [
-        childKey,
-        redact(childValue, childKey),
-      ]),
+async function replayCachedMessage(
+  options: QueueCraftDashboardOptions,
+  cached: CachedDlqMessage,
+): Promise<void> {
+  if (!cached.published) {
+    await options.sqsClient.send(
+      new SendMessageCommand({
+        QueueUrl: options.queueUrl,
+        MessageBody: cached.body,
+        MessageAttributes: cached.attributes,
+      }),
     );
+    cached.published = true;
   }
-  return value;
+  await options.sqsClient.send(
+    new DeleteMessageCommand({
+      QueueUrl: options.dlqUrl,
+      ReceiptHandle: cached.receiptHandle,
+    }),
+  );
 }
 
-function truncate(value: string): string {
-  return value.length > 500 ? value.slice(0, 497) + "..." : value;
+function dashboardHtml(writeToken: string): string {
+  return htmlTemplate.replace(
+    "__QUEUECRAFT_WRITE_TOKEN__",
+    JSON.stringify(writeToken),
+  );
+}
+
+function formatAuthority(host: string, port: number): string {
+  return (host.includes(":") ? `[${host}]` : host) + ":" + port;
+}
+
+function isExpectedHost(
+  hostHeader: string | undefined,
+  expectedOrigin: string,
+): boolean {
+  if (!hostHeader || /[\\/@?#\s]/.test(hostHeader)) return false;
+  try {
+    const candidate = new URL("http://" + hostHeader);
+    return (
+      candidate.origin === expectedOrigin &&
+      candidate.username === "" &&
+      candidate.password === "" &&
+      candidate.pathname === "/"
+    );
+  } catch {
+    return false;
+  }
+}
+
+function hasJsonContentType(value: string | undefined): boolean {
+  return value?.split(";", 1)[0]?.trim().toLowerCase() === "application/json";
+}
+
+function matchesWriteToken(
+  value: string | string[] | undefined,
+  expected: string,
+): boolean {
+  if (typeof value !== "string") return false;
+  const actualBytes = Buffer.from(value);
+  const expectedBytes = Buffer.from(expected);
+  return (
+    actualBytes.length === expectedBytes.length &&
+    timingSafeEqual(actualBytes, expectedBytes)
+  );
 }
 
 function formatTimestamp(value: string | undefined): string | undefined {
@@ -317,9 +423,8 @@ function sendHtml(response: ServerResponse, body: string): void {
   response.writeHead(200, {
     "content-type": "text/html; charset=utf-8",
     "content-security-policy":
-      "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'",
-    "x-content-type-options": "nosniff",
-    "cache-control": "no-store",
+      "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'",
+    ...securityHeaders(),
   });
   response.end(body);
 }
@@ -328,8 +433,16 @@ function sendJson(response: ServerResponse, status: number, value: unknown): voi
   if (response.headersSent) return;
   response.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
-    "cache-control": "no-store",
-    "x-content-type-options": "nosniff",
+    ...securityHeaders(),
   });
   response.end(JSON.stringify(value));
+}
+
+function securityHeaders(): Record<string, string> {
+  return {
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "referrer-policy": "no-referrer",
+  };
 }

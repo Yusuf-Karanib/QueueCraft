@@ -30,9 +30,22 @@ Do not paste an npm token into this repository or a chat.
    tag. For example, package version `0.1.1` requires tag `v0.1.1`.
 6. Wait for **Publish npm package** to pass, then verify a clean installation.
 
-The workflow refuses a version tag that does not match `package.json`. It can
-also be started manually from GitHub Actions when needed.
+The workflow refuses a version tag that does not match `package.json`, a tag
+whose commit is not contained in the repository's default branch, or a package
+that fails tests, type checking, build, and the dry-run package inspection.
+There is no manual publish trigger.
 
 The publish workflow uses a GitHub-hosted runner, Node.js 24, `id-token: write`,
 and npm's OIDC exchange. npm automatically records provenance for a public
 package published from a public repository through trusted publishing.
+
+## Repository-side controls
+
+- Protect `main` and require the ordinary CI workflow before merging.
+- Protect `v*` tags so only release maintainers can create or delete them.
+- Keep npm trusted publishing limited to this repository and
+  `.github/workflows/publish.yml`.
+- Review automated action updates before changing the immutable action commit
+  hashes in a workflow.
+- After release, compare the npm version and provenance with the intended Git
+  tag, and install it in a clean directory.

@@ -23,7 +23,7 @@ for documentation, dependency, security, and correctness fixes. Its unit-tested
 core and AWS infrastructure are usable for controlled pilots, but it has not
 yet earned a production-ready claim.
 
-Evidence: 83 automated tests, Node.js 20 and 22 CI, and an isolated real-AWS
+Evidence: 99 automated tests, Node.js 20 and 22 CI, and an isolated real-AWS
 workflow covering successful processing, duplicate suppression, failure,
 dead-letter redrive, trace propagation, and stack cleanup. See the
 [verification record](docs/verification.md).
@@ -44,7 +44,7 @@ Implemented:
 - OpenTelemetry-compatible lifecycle tracing without payload attributes
 - Active handler tracing so instrumented database and API calls can become child spans
 - Opt-in W3C `traceparent`/`tracestate` continuation from publishers through SQS to workers
-- Loopback-only queue dashboard with privacy-redacted DLQ replay
+- Loopback-only queue dashboard with body-hidden DLQ metadata and guarded replay
 - Automated checks for Node.js 20 and 22
 - Public npm package: `@yusufkaranib/queuecraft`
 
@@ -65,7 +65,7 @@ npm run dashboard:demo
 
 Open the local address printed in the terminal. The demo uses fake queue data,
 stays on `127.0.0.1`, and cannot change AWS resources. It shows queue health,
-redacted dead-letter messages, and guarded replay.
+safe dead-letter metadata with message bodies hidden, and guarded replay.
 
 ![QueueCraft local dashboard using fake data](docs/assets/dashboard.png)
 
@@ -196,6 +196,19 @@ are cancelled and the worker stops extending message visibility. A handler
 that ignores its signal may keep running in application code, but `stop()` will
 not wait forever and the DynamoDB lease can eventually expire.
 
+The poller heartbeat must be shorter than both its SQS visibility timeout and
+the `IdempotencyStore` lease. The default is half of the shorter deadline.
+QueueCraft rejects a configuration that could let either lease expire before a
+heartbeat.
+
+For an SQS-triggered Lambda, configure the event-source mapping with
+`ReportBatchItemFailures`. `QueueCraftLambdaProcessor` returns per-record
+failures; without that Lambda setting, AWS ignores the partial response and can
+acknowledge failed records. The Lambda processor's DynamoDB heartbeat must also
+be strictly shorter than the idempotency lease; it defaults to half that lease.
+If renewal fails, QueueCraft cancels the handler signal and returns that record
+as failed without trying to settle work under uncertain ownership.
+
 ## CloudWatch metrics and tracing
 
 QueueCraft can turn the same payload-free lifecycle events into CloudWatch
@@ -287,6 +300,9 @@ The template and beginner deployment instructions are in
 [`infrastructure/`](infrastructure/README.md). The template creates a standard
 queue, DLQ, DynamoDB lease table, separate least-privilege publisher and worker
 policies, and CloudWatch alarms.
+It accepts only `dev` and `test`; it is not a production baseline. Production
+planning starts with the [AWS operations
+checklist](docs/aws-operations-checklist.md), not by relabelling this stack.
 The operations dashboard and sustained backlog alarm are opt-in so deploying
 the default template does not silently add those two resources or their
 possible CloudWatch charges.
@@ -305,7 +321,7 @@ For a short case study, resume bullet, and recording script, see
 
 The dashboard shows ready, in-flight, and dead-letter counts. It can replay a
 failed standard-queue job only after a confirmation. It binds to your computer,
-keeps AWS credentials on the server, and redacts likely customer fields.
+keeps AWS credentials on the server, and hides message bodies by default.
 
 See [`docs/dashboard.md`](docs/dashboard.md) for setup and safety limits.
 Release steps are documented in [`docs/releasing.md`](docs/releasing.md).

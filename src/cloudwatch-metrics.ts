@@ -8,6 +8,7 @@ import type { QueueCraftEvent } from "./poller";
 const DEFAULT_NAMESPACE = "QueueCraft";
 const DEFAULT_BATCH_SIZE = 20;
 const DEFAULT_FLUSH_INTERVAL_MS = 10_000;
+const DEFAULT_MAX_PENDING_METRICS = 10_000;
 const MAX_METRICS_PER_REQUEST = 1_000;
 const MAX_USER_DIMENSIONS = 29;
 
@@ -35,6 +36,12 @@ export interface QueueCraftCloudWatchMetricsOptions
 
   /** Maximum time metrics remain buffered. Set to 0 for manual flushing only. */
   readonly flushIntervalMs?: number;
+
+  /**
+   * Hard cap for queued metric data points. When an entire event does not fit,
+   * its new data points are dropped and counted by `droppedMetricCount`.
+   */
+  readonly maxPendingMetrics?: number;
 
   /** Optional observer for CloudWatch delivery errors. Never throws. */
   readonly onError?: (error: unknown) => void;
@@ -71,14 +78,17 @@ export function mapQueueCraftEventToCloudWatchMetrics(
       return [metric("JobsStarted", 1, "Count")];
     case "job_completed":
     case "job_failed":
-    case "job_cancelled": {
+    case "job_cancelled":
+    case "job_settlement_failed": {
       const outcome = event.type.slice("job_".length);
       const metricName =
         event.type === "job_completed"
           ? "JobsCompleted"
           : event.type === "job_failed"
             ? "JobsFailed"
-            : "JobsCancelled";
+            : event.type === "job_cancelled"
+              ? "JobsCancelled"
+              : "JobsSettlementFailed";
       return [
         metric(metricName, 1, "Count"),
         metric("JobDuration", event.durationMs, "Milliseconds", [
@@ -107,17 +117,21 @@ export class QueueCraftCloudWatchMetrics {
   private readonly namespace: string;
   private readonly mappingOptions: QueueCraftCloudWatchMetricMappingOptions;
   private readonly maxBatchSize: number;
+  private readonly maxPendingMetrics: number;
   private readonly flushIntervalMs: number;
   private readonly onError?: (error: unknown) => void;
   private readonly pending: MetricDatum[] = [];
   private timer?: ReturnType<typeof setTimeout>;
   private activeFlush?: Promise<void>;
   private closed = false;
+  private droppedMetrics = 0;
 
   constructor(options: QueueCraftCloudWatchMetricsOptions) {
     this.client = options.client;
     this.namespace = options.namespace ?? DEFAULT_NAMESPACE;
     this.maxBatchSize = options.maxBatchSize ?? DEFAULT_BATCH_SIZE;
+    this.maxPendingMetrics =
+      options.maxPendingMetrics ?? DEFAULT_MAX_PENDING_METRICS;
     this.flushIntervalMs =
       options.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
     this.onError = options.onError;
@@ -134,9 +148,15 @@ export class QueueCraftCloudWatchMetrics {
     if (this.closed) return;
 
     try {
-      this.pending.push(
-        ...mapQueueCraftEventToCloudWatchMetrics(event, this.mappingOptions),
+      const metrics = mapQueueCraftEventToCloudWatchMetrics(
+        event,
+        this.mappingOptions,
       );
+      if (this.pending.length + metrics.length > this.maxPendingMetrics) {
+        this.droppedMetrics += metrics.length;
+        return;
+      }
+      this.pending.push(...metrics);
       if (this.pending.length >= this.maxBatchSize) {
         this.clearTimer();
         void this.flush().catch((error) => this.reportError(error));
@@ -181,6 +201,11 @@ export class QueueCraftCloudWatchMetrics {
     return this.pending.length;
   }
 
+  /** Total new metric data points dropped because the pending cap was full. */
+  get droppedMetricCount(): number {
+    return this.droppedMetrics;
+  }
+
   private async flushPending(): Promise<void> {
     while (this.pending.length > 0) {
       const batch = this.pending.splice(0, this.maxBatchSize);
@@ -192,6 +217,16 @@ export class QueueCraftCloudWatchMetrics {
           }),
         );
       } catch (error) {
+        const overflow = Math.max(
+          0,
+          this.pending.length + batch.length - this.maxPendingMetrics,
+        );
+        if (overflow > 0) {
+          // Preserve the older failed batch for retry and discard the newest
+          // queued points first. The in-memory queue remains strictly bounded.
+          this.pending.splice(this.pending.length - overflow, overflow);
+          this.droppedMetrics += overflow;
+        }
         this.pending.unshift(...batch);
         throw error;
       }
@@ -239,6 +274,12 @@ export class QueueCraftCloudWatchMetrics {
     }
     if (!Number.isInteger(this.flushIntervalMs) || this.flushIntervalMs < 0) {
       throw new RangeError("flushIntervalMs must be a non-negative integer.");
+    }
+    if (
+      !Number.isInteger(this.maxPendingMetrics) ||
+      this.maxPendingMetrics < 1
+    ) {
+      throw new RangeError("maxPendingMetrics must be a positive integer.");
     }
 
     validateDimensions(dimensions);

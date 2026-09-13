@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: QueueCraft development infrastructure with safe AWS defaults.
+Description: QueueCraft development and test infrastructure. This template is not a production baseline.
 
 Parameters:
   ProjectName:
@@ -13,8 +13,8 @@ Parameters:
     Default: dev
     AllowedValues:
       - dev
-      - staging
-      - production
+      - test
+    Description: Non-production label. This template intentionally refuses production.
 
   VisibilityTimeoutSeconds:
     Type: Number
@@ -281,7 +281,8 @@ Resources:
                   [{"expression": "SEARCH('{\"${ProjectName}/${Environment}\"} MetricName=\"JobsCompleted\"', 'Sum', 300)", "label": "Completed", "id": "e1"}],
                   [{"expression": "SEARCH('{\"${ProjectName}/${Environment}\"} MetricName=\"JobsFailed\"', 'Sum', 300)", "label": "Failed", "id": "e2"}],
                   [{"expression": "SEARCH('{\"${ProjectName}/${Environment}\"} MetricName=\"JobsCancelled\"', 'Sum', 300)", "label": "Cancelled", "id": "e3"}],
-                  [{"expression": "SEARCH('{\"${ProjectName}/${Environment}\"} MetricName=\"JobsDuplicate\"', 'Sum', 300)", "label": "Duplicates", "id": "e4"}]
+                  [{"expression": "SEARCH('{\"${ProjectName}/${Environment}\"} MetricName=\"JobsDuplicate\"', 'Sum', 300)", "label": "Duplicates", "id": "e4"}],
+                  [{"expression": "SEARCH('{\"${ProjectName}/${Environment}\"} MetricName=\"JobsSettlementFailed\"', 'Sum', 300)", "label": "Settlement failed", "id": "e5"}]
                 ]
               }
             },

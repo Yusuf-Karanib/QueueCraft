@@ -27,6 +27,10 @@ Meta signed webhook -> AWS Lambda web app -> QueueCraftPublisher -> SQS
 - let SQS redrive repeatedly failing messages to the DLQ;
 - provide separate producer and consumer IAM policies and queue alarms.
 
+YallaQueue's Lambda event-source mapping enables
+`ReportBatchItemFailures`. That setting is required: without it, Lambda ignores
+the processor's per-record failure response and can acknowledge failed records.
+
 ## YallaQueue's responsibility
 
 - verify Meta's webhook signature;

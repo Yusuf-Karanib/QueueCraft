@@ -1,6 +1,6 @@
 import {
   createQueueCraftDashboard
-} from "./chunk-AGN4MPTV.js";
+} from "./chunk-EPE6CK6I.js";
 
 // src/publisher.ts
 import {
@@ -405,7 +405,11 @@ var QueueCraftPoller = class {
     this.waitTimeSeconds = options.worker.waitTimeSeconds ?? 20;
     this.batchSize = options.worker.batchSize ?? MAX_SQS_BATCH;
     this.visibilityTimeoutSeconds = options.worker.visibilityTimeoutSeconds ?? 60;
-    this.heartbeatIntervalMs = options.worker.heartbeatIntervalMs ?? Math.floor(this.visibilityTimeoutSeconds * 1e3 / 2);
+    const shortestLeaseMs = Math.min(
+      this.visibilityTimeoutSeconds * 1e3,
+      this.idempotency.leaseDurationSeconds * 1e3
+    );
+    this.heartbeatIntervalMs = options.worker.heartbeatIntervalMs ?? Math.floor(shortestLeaseMs / 2);
     this.shutdownTimeoutMs = options.worker.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
     this.validateOptions(options.worker.concurrency);
   }
@@ -548,13 +552,13 @@ var QueueCraftPoller = class {
     const handlerController = new AbortController();
     const heartbeatController = new AbortController();
     this.activeExecutions.set(handlerController, heartbeatController);
-    let heartbeatError;
+    let heartbeatFailed = false;
     const heartbeat = this.runHeartbeat(
       lease,
       receiptHandle,
       heartbeatController.signal
     ).catch((error) => {
-      heartbeatError = error;
+      heartbeatFailed = true;
       handlerController.abort(error);
       this.reportError(error, message);
     });
@@ -596,7 +600,7 @@ var QueueCraftPoller = class {
       await heartbeat;
       this.activeExecutions.delete(handlerController);
     }
-    if (heartbeatError !== void 0) {
+    if (heartbeatFailed) {
       this.reportEvent({
         type: "job_cancelled",
         idempotencyKey,
@@ -632,16 +636,36 @@ var QueueCraftPoller = class {
     }
     try {
       await this.idempotency.markComplete(lease);
-      await this.deleteMessage(receiptHandle);
+    } catch (error) {
       this.reportEvent({
-        type: "job_completed",
+        type: "job_settlement_failed",
         idempotencyKey,
         attempt,
-        durationMs: Date.now() - startedAt
+        durationMs: Date.now() - startedAt,
+        stage: "mark_complete"
       });
-    } catch (err) {
-      this.reportError(err, message);
+      this.reportError(error, message);
+      return;
     }
+    try {
+      await this.deleteMessage(receiptHandle);
+    } catch (error) {
+      this.reportEvent({
+        type: "job_settlement_failed",
+        idempotencyKey,
+        attempt,
+        durationMs: Date.now() - startedAt,
+        stage: "delete_message"
+      });
+      this.reportError(error, message);
+      return;
+    }
+    this.reportEvent({
+      type: "job_completed",
+      idempotencyKey,
+      attempt,
+      durationMs: Date.now() - startedAt
+    });
   }
   async deleteMessage(receiptHandle) {
     await this.sqs.send(
@@ -727,7 +751,10 @@ var QueueCraftPoller = class {
       this.heartbeatIntervalMs,
       "heartbeatIntervalMs",
       1,
-      this.visibilityTimeoutSeconds * 1e3 - 1
+      Math.min(
+        this.visibilityTimeoutSeconds * 1e3,
+        this.idempotency.leaseDurationSeconds * 1e3
+      ) - 1
     );
     this.assertIntegerInRange(
       this.shutdownTimeoutMs,
@@ -910,6 +937,7 @@ var QueueCraftLambdaProcessor = class {
   instrumentation;
   traceContext;
   semaphore;
+  heartbeatIntervalMs;
   idempotencyAttribute;
   onError;
   onEvent;
@@ -920,6 +948,13 @@ var QueueCraftLambdaProcessor = class {
     this.instrumentation = options.instrumentation;
     this.traceContext = options.traceContext;
     this.semaphore = new Semaphore(concurrency);
+    const leaseDurationMs = this.idempotency.leaseDurationSeconds * 1e3;
+    this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? Math.floor(leaseDurationMs / 2);
+    if (!Number.isInteger(this.heartbeatIntervalMs) || this.heartbeatIntervalMs < 1 || this.heartbeatIntervalMs >= leaseDurationMs) {
+      throw new RangeError(
+        `heartbeatIntervalMs must be an integer between 1 and ${leaseDurationMs - 1}.`
+      );
+    }
     this.idempotencyAttribute = options.idempotencyAttribute ?? IDEMPOTENCY_ATTRIBUTE;
     if (this.traceContext && [TRACEPARENT_ATTRIBUTE, TRACESTATE_ATTRIBUTE].includes(
       this.idempotencyAttribute
@@ -982,7 +1017,31 @@ var QueueCraftLambdaProcessor = class {
       return false;
     }
     const lease = acquisition.lease;
+    if (signal.aborted) {
+      await this.safeRelease(lease, record);
+      return false;
+    }
+    const handlerController = new AbortController();
+    const heartbeatController = new AbortController();
+    const forwardInvocationAbort = () => {
+      handlerController.abort(
+        signal.reason ?? new Error("Lambda invocation is ending.")
+      );
+    };
+    signal.addEventListener("abort", forwardInvocationAbort, { once: true });
+    if (signal.aborted) forwardInvocationAbort();
+    let heartbeatFailed = false;
+    const heartbeat = this.runHeartbeat(
+      lease,
+      heartbeatController.signal
+    ).catch((error) => {
+      heartbeatFailed = true;
+      handlerController.abort(error);
+      this.reportError(error, record);
+    });
     let handlerReturned = false;
+    let handlerFailed = false;
+    let handlerError;
     const attempt = this.receiveCount(record);
     const startedAt = Date.now();
     this.reportEvent({ type: "job_started", idempotencyKey, attempt });
@@ -991,7 +1050,7 @@ var QueueCraftLambdaProcessor = class {
       const context = {
         idempotencyKey,
         attempt,
-        signal
+        signal: handlerController.signal
       };
       await runWithQueueCraftTraceContext({
         traceContext: this.traceContext,
@@ -1013,30 +1072,89 @@ var QueueCraftLambdaProcessor = class {
         }),
         onError: (traceContextError) => this.reportError(traceContextError, record)
       });
-      if (signal.aborted) {
-        throw new Error("Lambda invocation is ending before job completion.");
-      }
-      await this.idempotency.markComplete(lease);
+    } catch (error) {
+      handlerFailed = true;
+      handlerError = error;
+    } finally {
+      heartbeatController.abort();
+      await heartbeat;
+      signal.removeEventListener("abort", forwardInvocationAbort);
+      if (signal.aborted) forwardInvocationAbort();
+    }
+    if (heartbeatFailed) {
       this.reportEvent({
-        type: "job_completed",
+        type: "job_cancelled",
         idempotencyKey,
         attempt,
         durationMs: Date.now() - startedAt
       });
-      return true;
-    } catch (error) {
+      return false;
+    }
+    if (handlerFailed) {
       if (!handlerReturned) {
         await this.safeRelease(lease, record);
       }
       this.reportEvent({
-        type: signal.aborted ? "job_cancelled" : "job_failed",
+        type: handlerController.signal.aborted ? "job_cancelled" : "job_failed",
         idempotencyKey,
         attempt,
         durationMs: Date.now() - startedAt
       });
+      this.reportError(handlerError, record);
+      return false;
+    }
+    if (handlerController.signal.aborted) {
+      this.reportEvent({
+        type: "job_cancelled",
+        idempotencyKey,
+        attempt,
+        durationMs: Date.now() - startedAt
+      });
+      this.reportError(
+        handlerController.signal.reason ?? new Error("Lambda invocation is ending before job completion."),
+        record
+      );
+      return false;
+    }
+    try {
+      await this.idempotency.markComplete(lease);
+    } catch (error) {
+      this.reportEvent({
+        type: "job_settlement_failed",
+        idempotencyKey,
+        attempt,
+        durationMs: Date.now() - startedAt,
+        stage: "mark_complete"
+      });
       this.reportError(error, record);
       return false;
     }
+    this.reportEvent({
+      type: "job_completed",
+      idempotencyKey,
+      attempt,
+      durationMs: Date.now() - startedAt
+    });
+    return true;
+  }
+  async runHeartbeat(lease, signal) {
+    while (await this.waitForHeartbeat(signal)) {
+      await this.idempotency.renewLease(lease);
+    }
+  }
+  waitForHeartbeat(signal) {
+    if (signal.aborted) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(true);
+      }, this.heartbeatIntervalMs);
+      const onAbort = () => {
+        clearTimeout(timeout);
+        resolve(false);
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
   }
   toSdkMessage(record) {
     const attributeNames = this.traceContext ? [
@@ -1104,6 +1222,7 @@ var DEFAULT_RECORD_TTL_SECONDS = 14 * 24 * 60 * 60;
 var IdempotencyStore = class {
   client;
   tableName;
+  /** Lease lifetime used by processors to choose a safe heartbeat interval. */
   leaseDurationSeconds;
   recordTtlSeconds;
   now;
@@ -1128,8 +1247,9 @@ var IdempotencyStore = class {
     this.assertIdentifier(messageId, "messageId");
     this.assertIdentifier(ownerId, "ownerId");
     for (let attempt = 0; attempt < 2; attempt++) {
-      const nowSeconds = Math.floor(this.now() / 1e3);
-      const leaseUntil = nowSeconds + this.leaseDurationSeconds;
+      const nowMilliseconds = this.now();
+      const nowSeconds = Math.floor(nowMilliseconds / 1e3);
+      const leaseUntil = Math.ceil(nowMilliseconds / 1e3) + this.leaseDurationSeconds;
       try {
         await this.client.send(
           new UpdateItemCommand({
@@ -1174,7 +1294,9 @@ var IdempotencyStore = class {
     return { status: "in_progress" };
   }
   async renewLease(lease) {
-    const nowSeconds = Math.floor(this.now() / 1e3);
+    const nowMilliseconds = this.now();
+    const nowSeconds = Math.floor(nowMilliseconds / 1e3);
+    const leaseUntil = Math.ceil(nowMilliseconds / 1e3) + this.leaseDurationSeconds;
     await this.client.send(
       new UpdateItemCommand({
         TableName: this.tableName,
@@ -1192,7 +1314,7 @@ var IdempotencyStore = class {
           ":inProgress": { S: LeaseState.InProgress },
           ":ownerId": { S: lease.ownerId },
           ":leaseUntil": {
-            N: String(nowSeconds + this.leaseDurationSeconds)
+            N: String(leaseUntil)
           },
           ":now": { N: String(nowSeconds) },
           ":expiresAt": {
@@ -1289,6 +1411,7 @@ import {
 var DEFAULT_NAMESPACE = "QueueCraft";
 var DEFAULT_BATCH_SIZE = 20;
 var DEFAULT_FLUSH_INTERVAL_MS = 1e4;
+var DEFAULT_MAX_PENDING_METRICS = 1e4;
 var MAX_METRICS_PER_REQUEST = 1e3;
 var MAX_USER_DIMENSIONS = 29;
 function mapQueueCraftEventToCloudWatchMetrics(event, options = {}) {
@@ -1309,9 +1432,10 @@ function mapQueueCraftEventToCloudWatchMetrics(event, options = {}) {
       return [metric("JobsStarted", 1, "Count")];
     case "job_completed":
     case "job_failed":
-    case "job_cancelled": {
+    case "job_cancelled":
+    case "job_settlement_failed": {
       const outcome = event.type.slice("job_".length);
-      const metricName = event.type === "job_completed" ? "JobsCompleted" : event.type === "job_failed" ? "JobsFailed" : "JobsCancelled";
+      const metricName = event.type === "job_completed" ? "JobsCompleted" : event.type === "job_failed" ? "JobsFailed" : event.type === "job_cancelled" ? "JobsCancelled" : "JobsSettlementFailed";
       return [
         metric(metricName, 1, "Count"),
         metric("JobDuration", event.durationMs, "Milliseconds", [
@@ -1338,16 +1462,19 @@ var QueueCraftCloudWatchMetrics = class {
   namespace;
   mappingOptions;
   maxBatchSize;
+  maxPendingMetrics;
   flushIntervalMs;
   onError;
   pending = [];
   timer;
   activeFlush;
   closed = false;
+  droppedMetrics = 0;
   constructor(options) {
     this.client = options.client;
     this.namespace = options.namespace ?? DEFAULT_NAMESPACE;
     this.maxBatchSize = options.maxBatchSize ?? DEFAULT_BATCH_SIZE;
+    this.maxPendingMetrics = options.maxPendingMetrics ?? DEFAULT_MAX_PENDING_METRICS;
     this.flushIntervalMs = options.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
     this.onError = options.onError;
     this.mappingOptions = {
@@ -1360,9 +1487,15 @@ var QueueCraftCloudWatchMetrics = class {
   onEvent = (event) => {
     if (this.closed) return;
     try {
-      this.pending.push(
-        ...mapQueueCraftEventToCloudWatchMetrics(event, this.mappingOptions)
+      const metrics = mapQueueCraftEventToCloudWatchMetrics(
+        event,
+        this.mappingOptions
       );
+      if (this.pending.length + metrics.length > this.maxPendingMetrics) {
+        this.droppedMetrics += metrics.length;
+        return;
+      }
+      this.pending.push(...metrics);
       if (this.pending.length >= this.maxBatchSize) {
         this.clearTimer();
         void this.flush().catch((error) => this.reportError(error));
@@ -1402,6 +1535,10 @@ var QueueCraftCloudWatchMetrics = class {
   get pendingMetricCount() {
     return this.pending.length;
   }
+  /** Total new metric data points dropped because the pending cap was full. */
+  get droppedMetricCount() {
+    return this.droppedMetrics;
+  }
   async flushPending() {
     while (this.pending.length > 0) {
       const batch = this.pending.splice(0, this.maxBatchSize);
@@ -1413,6 +1550,14 @@ var QueueCraftCloudWatchMetrics = class {
           })
         );
       } catch (error) {
+        const overflow = Math.max(
+          0,
+          this.pending.length + batch.length - this.maxPendingMetrics
+        );
+        if (overflow > 0) {
+          this.pending.splice(this.pending.length - overflow, overflow);
+          this.droppedMetrics += overflow;
+        }
         this.pending.unshift(...batch);
         throw error;
       }
@@ -1448,6 +1593,9 @@ var QueueCraftCloudWatchMetrics = class {
     }
     if (!Number.isInteger(this.flushIntervalMs) || this.flushIntervalMs < 0) {
       throw new RangeError("flushIntervalMs must be a non-negative integer.");
+    }
+    if (!Number.isInteger(this.maxPendingMetrics) || this.maxPendingMetrics < 1) {
+      throw new RangeError("maxPendingMetrics must be a positive integer.");
     }
     validateDimensions(dimensions);
   }
@@ -1580,6 +1728,15 @@ var QueueCraftTracingObserver = class {
             event.durationMs
           );
           break;
+        case "job_settlement_failed":
+          this.finishJob(
+            event.idempotencyKey,
+            "settlement_failed",
+            event.attempt,
+            event.durationMs,
+            { "queuecraft.settlement_stage": event.stage }
+          );
+          break;
         case "job_duplicate":
           this.recordInstantSpan(`${this.spanName}.duplicate`, {
             "queuecraft.duplicate_state": event.state
@@ -1624,7 +1781,7 @@ var QueueCraftTracingObserver = class {
     });
     this.active.set(idempotencyKey, { span });
   }
-  finishJob(idempotencyKey, outcome, attempt, durationMs) {
+  finishJob(idempotencyKey, outcome, attempt, durationMs, attributes = {}) {
     const active = this.active.get(idempotencyKey);
     const span = active?.span ?? this.tracer.startSpan(this.spanName, {
       attributes: {
@@ -1635,6 +1792,13 @@ var QueueCraftTracingObserver = class {
       }
     });
     this.active.delete(idempotencyKey);
+    for (const [name, value] of Object.entries(attributes)) {
+      try {
+        span.setAttribute(name, value);
+      } catch (error) {
+        this.reportError(error);
+      }
+    }
     this.finishSpan(span, outcome, durationMs);
   }
   recordInstantSpan(name, attributes) {

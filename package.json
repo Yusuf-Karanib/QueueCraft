@@ -1,6 +1,6 @@
 {
   "name": "@yusufkaranib/queuecraft",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Reliable TypeScript job processing for AWS SQS with DynamoDB idempotency and observability",
   "type": "module",
   "main": "./dist/index.js",
@@ -61,5 +61,8 @@
     "tsup": "^8.5.1",
     "typescript": "^5.6.3",
     "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "esbuild": "^0.28.2"
   }
 }

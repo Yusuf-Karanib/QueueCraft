@@ -5,9 +5,7 @@ on:
     tags:
       - "v*.*.*"
 
-permissions:
-  contents: read
-  id-token: write
+permissions: {}
 
 concurrency:
   group: npm-publish
@@ -17,18 +15,29 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
       - name: Check release tag
         run: node -e "const v=require('./package.json').version; if (process.env.GITHUB_REF_NAME !== 'v'+v) throw new Error('Tag must equal v'+v)"
+      - name: Check release commit is on the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: git merge-base --is-ancestor "$GITHUB_SHA" "origin/$DEFAULT_BRANCH"
       - run: npm ci
       - run: npm test
       - run: npm run typecheck
       - run: npm run build
-      - run: npm publish
+      - run: npm pack --dry-run
+      - run: npm publish --access public --provenance

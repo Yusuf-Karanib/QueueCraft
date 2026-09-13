@@ -35,6 +35,7 @@ The poller and Lambda processor expose the same event types.
 | `job_completed` | completion was stored and SQS was acknowledged | completed count and duration |
 | `job_failed` | the handler failed and the lease was released | failure count and duration |
 | `job_cancelled` | ownership was lost or shutdown cancelled the handler | cancellation count |
+| `job_settlement_failed` | the handler succeeded but storing completion or acknowledging SQS failed | settlement failure count, stage, and duration |
 | `job_duplicate` | the stable key already had state | duplicate count by state |
 | `shutdown_timeout` | active work exceeded the shutdown grace period | shutdown health alert |
 
@@ -80,6 +81,13 @@ The writer sends after 20 metric data points or 10 seconds by default. Call
 `close()` during shutdown so the final partial batch is sent. A failed batch
 stays buffered and can be retried with `flush()`.
 
+The in-memory queue is capped by `maxPendingMetrics`, which defaults to 10,000
+data points. If every data point for a new event cannot fit, QueueCraft drops
+that event's whole metric set and increments `droppedMetricCount`. If an older
+in-flight batch fails while the queue is full, QueueCraft keeps the older batch
+and drops the newest queued points first. Monitor the drop counter; increasing
+the cap only moves the memory limit and does not fix a failing CloudWatch path.
+
 CloudWatch custom metrics may create AWS charges. Keep dimensions bounded and
 enable only the measurements you intend to operate.
 
@@ -96,6 +104,7 @@ QueueCraft emits these metric names:
 | `JobsCompleted` | Count | jobs committed and acknowledged |
 | `JobsFailed` | Count | handlers that failed |
 | `JobsCancelled` | Count | jobs cancelled after lost ownership or shutdown |
+| `JobsSettlementFailed` | Count | successful handlers whose `mark_complete` or `delete_message` settlement stage failed |
 | `JobsDuplicate` | Count | duplicate jobs, split by bounded state |
 | `JobDuration` | Milliseconds | QueueCraft processing time after lease acquisition, including handler and settlement work, split by bounded outcome |
 | `ShutdownTimeouts` | Count | graceful shutdown deadlines exceeded |

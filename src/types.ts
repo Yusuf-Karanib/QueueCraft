@@ -76,7 +76,8 @@ export interface WorkerOptions {
 
   /**
    * How often the worker renews SQS visibility and the DynamoDB lease.
-   * Must be shorter than the visibility timeout. Defaults to half of it.
+   * Must be shorter than both the visibility timeout and the idempotency
+   * lease. Defaults to half of the shorter lease.
    */
   readonly heartbeatIntervalMs?: number;
 

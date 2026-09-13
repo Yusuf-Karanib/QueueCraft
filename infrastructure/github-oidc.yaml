@@ -46,6 +46,18 @@ Conditions:
     - !Ref CreateGitHubOidcProvider
     - "true"
 
+Rules:
+  ExistingProviderArnRequiredWhenNotCreating:
+    RuleCondition: !Equals
+      - !Ref CreateGitHubOidcProvider
+      - "false"
+    Assertions:
+      - Assert: !Not
+          - !Equals
+            - !Ref ExistingGitHubOidcProviderArn
+            - ""
+        AssertDescription: ExistingGitHubOidcProviderArn is required when CreateGitHubOidcProvider is false.
+
 Resources:
   GitHubOidcProvider:
     Type: AWS::IAM::OIDCProvider

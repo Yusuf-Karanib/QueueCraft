@@ -107,6 +107,7 @@ function createHarness(
   workerOverrides: Partial<WorkerOptions> = {},
   instrumentation?: QueueCraftJobInstrumentation,
   traceContext?: QueueCraftTraceContextPropagation,
+  leaseDurationSeconds = 60,
 ): Harness {
   const message: Message = {
     MessageId: "sqs-message-1",
@@ -172,6 +173,7 @@ function createHarness(
     idempotency: new IdempotencyStore({
       client: dynamoClient,
       tableName: "queuecraft-leases",
+      leaseDurationSeconds,
       now: () => 1_700_000_000_000,
     }),
     queueUrl: QUEUE_URL,
@@ -536,6 +538,97 @@ describe("QueueCraftPoller", () => {
         idempotencyKey: STABLE_JOB_ID,
       }),
     );
+  });
+
+  it("treats a heartbeat rejection without a value as ownership loss", async () => {
+    const harness = createHarness(
+      async (_message, context) => {
+        await new Promise<void>((resolve) => {
+          context.signal.addEventListener("abort", () => resolve(), {
+            once: true,
+          });
+        });
+      },
+      undefined,
+      { visibilityTimeoutSeconds: 1, heartbeatIntervalMs: 5 },
+    );
+    let updateCount = 0;
+    harness.dynamoSend.mockImplementation((command: { __type: string }) => {
+      if (command.__type === "UpdateItem" && ++updateCount === 2) {
+        return Promise.reject();
+      }
+      return Promise.resolve({});
+    });
+
+    await runOnce(harness.poller);
+
+    expect(commandsOfType(harness.sqsSend, "DeleteMessage")).toHaveLength(0);
+    expect(commandsOfType(harness.dynamoSend, "DeleteItem")).toHaveLength(0);
+    expect(harness.onEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "job_cancelled" }),
+    );
+  });
+
+  it("emits a terminal event when completion storage fails", async () => {
+    const harness = createHarness(async () => undefined);
+    let updateCount = 0;
+    harness.dynamoSend.mockImplementation((command: { __type: string }) => {
+      if (command.__type === "UpdateItem") {
+        updateCount += 1;
+        if (updateCount === 2) {
+          return Promise.reject(new Error("completion storage failed"));
+        }
+      }
+      return Promise.resolve({});
+    });
+
+    await runOnce(harness.poller);
+
+    expect(harness.onEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "job_settlement_failed",
+        stage: "mark_complete",
+      }),
+    );
+    expect(commandsOfType(harness.sqsSend, "DeleteMessage")).toHaveLength(0);
+  });
+
+  it("emits a terminal event when SQS acknowledgement fails", async () => {
+    const harness = createHarness(async () => undefined);
+    const originalSend = harness.sqsSend.getMockImplementation() as (
+      command: { __type: string },
+    ) => unknown;
+    harness.sqsSend.mockImplementation((command: { __type: string }) => {
+      if (command.__type === "DeleteMessage") {
+        return Promise.reject(new Error("delete failed"));
+      }
+      return originalSend(command);
+    });
+
+    const started = harness.poller.start();
+    await vi.waitFor(() =>
+      expect(harness.onEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "job_settlement_failed",
+          stage: "delete_message",
+        }),
+      ),
+    );
+    await harness.poller.stop();
+    await started;
+  });
+
+  it("rejects a heartbeat that can outlive the idempotency lease", () => {
+    expect(() =>
+      createHarness(
+        async () => undefined,
+        undefined,
+        { visibilityTimeoutSeconds: 60, heartbeatIntervalMs: 1_000 },
+        undefined,
+        undefined,
+        1,
+      ),
+    ).toThrow("heartbeatIntervalMs must be an integer between 1 and 999");
   });
 
   it("returns messages received during shutdown without executing them", async () => {

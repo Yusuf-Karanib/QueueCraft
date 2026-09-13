@@ -1,4 +1,10 @@
-# QueueCraft AWS infrastructure
+# QueueCraft development and test AWS infrastructure
+
+This template is deliberately non-production. Its `Environment` parameter
+accepts only `dev` or `test`; a resource name is not a security boundary. For a
+real production deployment, copy the design into a separately reviewed
+template and complete the [AWS account and production
+checklist](../docs/aws-operations-checklist.md).
 
 The CloudFormation template creates the first real QueueCraft environment:
 
@@ -68,6 +74,36 @@ The important outputs are:
 Creating the resources does not start a worker. A separate consumer, such as an
 SQS-triggered Lambda function, must use the queue and table outputs.
 
+## Lambda and lease requirements
+
+When `QueueCraftLambdaProcessor.process()` handles an SQS Lambda event, the
+event-source mapping must contain:
+
+```yaml
+FunctionResponseTypes:
+  - ReportBatchItemFailures
+```
+
+QueueCraft returns the failed record IDs instead of throwing for the whole
+batch. Without this setting, Lambda ignores that partial response and can
+remove failed records instead of retrying them.
+
+Keep the SQS queue visibility timeout safely above the Lambda function timeout.
+Also keep the processor's DynamoDB lease heartbeat strictly shorter than the
+`IdempotencyStore` lease. A long-polling `QueueCraftPoller` has two deadlines,
+so its heartbeat must be shorter than both the SQS visibility timeout and the
+DynamoDB lease. QueueCraft rejects unsafe heartbeat settings, but the operator
+still owns the queue, Lambda, and retry configuration.
+
+The Lambda heartbeat defaults to half of the DynamoDB lease. The poller
+heartbeat defaults to half of whichever is shorter: the visibility timeout or
+the DynamoDB lease. If a renewal fails, QueueCraft cancels the handler signal
+and does not settle the record under uncertain ownership.
+
+The handler must stop side effects when its `AbortSignal` is cancelled. A lease
+reduces duplicate execution; it cannot undo an external API call that already
+succeeded.
+
 ## Optional operations view
 
 `EnableOperationsDashboard=true` creates a private CloudWatch dashboard for:
@@ -109,3 +145,15 @@ be added later after message-group behavior is specified and tested.
   narrowly scoped test role.
 
 Neither template grants access to YallaQueue's queues or tables.
+
+## Production boundary
+
+This development template does not claim to provide production durability,
+capacity planning, account monitoring, or an incident-response process. In
+particular, point-in-time recovery is off by default, provisioned DynamoDB
+capacity is fixed, stack deletion can remove data resources, and the optional
+SNS topic does not use a customer-managed KMS key. Do not bypass the
+`Environment` restriction by giving a production workload a `dev` label.
+
+Before designing a separate production stack, complete
+[`../docs/aws-operations-checklist.md`](../docs/aws-operations-checklist.md).

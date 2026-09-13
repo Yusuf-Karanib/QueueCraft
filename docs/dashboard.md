@@ -4,7 +4,7 @@ QueueCraft includes a small local operations page for:
 
 - ready, in-flight, and delayed message counts;
 - dead-letter queue count and message metadata;
-- privacy-redacted JSON previews;
+- message-body-hidden DLQ entries;
 - confirmed replay from the DLQ to the main queue.
 
 ## Try it without AWS
@@ -42,14 +42,24 @@ queuecraft-dashboard
 
 - The server accepts only loopback hosts. It cannot be bound to `0.0.0.0`.
 - AWS credentials remain in the Node.js process and are never sent to the page.
-- The page never receives SQS receipt handles or full unredacted message bodies.
-- JSON fields likely to contain phone numbers, email, message text, tokens, or
-  secrets are replaced with `[redacted]`.
-- Non-JSON message bodies are hidden.
+- The page never receives SQS receipt handles or message bodies. The server
+  keeps a full body only in its short-lived in-memory replay cache.
+- The server rejects unexpected `Host` headers. Write requests must have the
+  exact dashboard `Origin`, JSON content type, and a random per-process write
+  token supplied to the dashboard page.
+- Responses disable caching, MIME sniffing, referrers, and framing. The page's
+  content-security policy also blocks other frame ancestors, objects, forms,
+  and unexpected network destinations.
 - Replaying requires an explicit browser confirmation and a server-side cache
   entry created by refreshing the DLQ.
+- Simultaneous replay requests for one message share one in-process operation,
+  so they do not publish that cached message twice.
 - FIFO replay is not supported yet because replay requires an application
   decision about message group ordering.
+
+This is a local operator tool, not a multi-user authenticated service. Any
+person or program that can open the local page and act as that browser session
+can use its AWS permissions. Stop it when the review is finished.
 
 ## Replay behavior
 

@@ -6,7 +6,7 @@
  * commits or retries each message based on the handler's outcome.
  *
  *   receive -> acquireLock -> handler
- *                              |-- ok   --> deleteMessage + markComplete
+ *                              |-- ok   --> markComplete + deleteMessage
  *                              `-- err  --> releaseLock (SQS redelivers)
  */
 import {
@@ -72,6 +72,13 @@ export type QueueCraftEvent =
       readonly idempotencyKey: string;
       readonly attempt: number;
       readonly durationMs: number;
+    }
+  | {
+      readonly type: "job_settlement_failed";
+      readonly idempotencyKey: string;
+      readonly attempt: number;
+      readonly durationMs: number;
+      readonly stage: "mark_complete" | "delete_message";
     }
   | {
       readonly type: "job_duplicate";
@@ -178,9 +185,13 @@ export class QueueCraftPoller {
     this.batchSize = options.worker.batchSize ?? MAX_SQS_BATCH;
     this.visibilityTimeoutSeconds =
       options.worker.visibilityTimeoutSeconds ?? 60;
+    const shortestLeaseMs = Math.min(
+      this.visibilityTimeoutSeconds * 1000,
+      this.idempotency.leaseDurationSeconds * 1000,
+    );
     this.heartbeatIntervalMs =
       options.worker.heartbeatIntervalMs ??
-      Math.floor((this.visibilityTimeoutSeconds * 1000) / 2);
+      Math.floor(shortestLeaseMs / 2);
     this.shutdownTimeoutMs =
       options.worker.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
 
@@ -361,14 +372,14 @@ export class QueueCraftPoller {
     const handlerController = new AbortController();
     const heartbeatController = new AbortController();
     this.activeExecutions.set(handlerController, heartbeatController);
-    let heartbeatError: unknown;
+    let heartbeatFailed = false;
 
     const heartbeat = this.runHeartbeat(
       lease,
       receiptHandle,
       heartbeatController.signal,
     ).catch((error) => {
-      heartbeatError = error;
+      heartbeatFailed = true;
       handlerController.abort(error);
       this.reportError(error, message);
     });
@@ -415,7 +426,7 @@ export class QueueCraftPoller {
       this.activeExecutions.delete(handlerController);
     }
 
-    if (heartbeatError !== undefined) {
+    if (heartbeatFailed) {
       // Ownership is uncertain. Never settle with a possibly stale receipt
       // handle or release a lease that another worker may now own.
       this.reportEvent({
@@ -461,18 +472,42 @@ export class QueueCraftPoller {
     // acknowledges the duplicate without running the handler again.
     try {
       await this.idempotency.markComplete(lease);
-      await this.deleteMessage(receiptHandle);
+    } catch (error) {
+      // Do not release the lease: the handler already returned successfully.
+      // A retry may take over only after this lease expires.
       this.reportEvent({
-        type: "job_completed",
+        type: "job_settlement_failed",
         idempotencyKey,
         attempt,
         durationMs: Date.now() - startedAt,
+        stage: "mark_complete",
       });
-    } catch (err) {
-      // Do not release the lease: the handler already returned successfully.
-      // A retry can observe COMPLETED or take over only after an expired lease.
-      this.reportError(err, message);
+      this.reportError(error, message);
+      return;
     }
+
+    try {
+      await this.deleteMessage(receiptHandle);
+    } catch (error) {
+      // DynamoDB already says COMPLETED. A transport retry will be recognized
+      // as a completed duplicate and acknowledged without rerunning the job.
+      this.reportEvent({
+        type: "job_settlement_failed",
+        idempotencyKey,
+        attempt,
+        durationMs: Date.now() - startedAt,
+        stage: "delete_message",
+      });
+      this.reportError(error, message);
+      return;
+    }
+
+    this.reportEvent({
+      type: "job_completed",
+      idempotencyKey,
+      attempt,
+      durationMs: Date.now() - startedAt,
+    });
   }
 
   private async deleteMessage(receiptHandle: string): Promise<void> {
@@ -579,7 +614,10 @@ export class QueueCraftPoller {
       this.heartbeatIntervalMs,
       "heartbeatIntervalMs",
       1,
-      this.visibilityTimeoutSeconds * 1000 - 1,
+      Math.min(
+        this.visibilityTimeoutSeconds * 1000,
+        this.idempotency.leaseDurationSeconds * 1000,
+      ) - 1,
     );
     this.assertIntegerInRange(
       this.shutdownTimeoutMs,
