@@ -21,6 +21,50 @@ It is tested in isolation against real AWS resources, but it is not yet proven
 by production traffic. SQS is at-least-once, so QueueCraft reduces duplicate
 work rather than promising universal exactly-once side effects.
 
+## AWS Summit explanation
+
+**Twenty-second version**
+
+“QueueCraft is a reusable TypeScript toolkit for reliable background processing
+with AWS SQS. It handles publishing, bounded worker concurrency, retries,
+dead-letter queues, DynamoDB-backed duplicate suppression, and observability.
+YallaQueue is the real booking application I built to prove that the same engine
+can be used outside a demonstration.”
+
+**Where YallaQueue runs**
+
+```text
+Customer WhatsApp message
+        |
+        v
+Meta signed webhook -> AWS Lambda web app -> SQS -> worker Lambda
+                                                    |-> QueueCraft and DynamoDB
+                                                    |   job coordination
+                                                    |-> Supabase appointments
+                                                    |-> WhatsApp confirmation
+                                                    +-> SES email
+```
+
+The web Lambda verifies the webhook and responds quickly. SQS holds unfinished
+work. The worker Lambda runs the booking logic. Supabase stores shops and
+appointments, while DynamoDB coordinates execution leases and remembers
+completed stable job IDs. CloudWatch provides operational signals, and AWS
+Secrets Manager holds deployed credentials.
+
+**Questions to be ready for**
+
+- **Why SQS?** It separates a fast web response from work that may be slow or
+  fail, absorbs traffic spikes, and supplies managed retries and DLQ redrive.
+- **Can a message arrive twice?** Yes. Standard SQS is at-least-once.
+  QueueCraft reduces duplicate execution with a stable source-event ID and
+  DynamoDB, while the application's business action must still be retry-safe.
+- **Why both DynamoDB and Supabase?** DynamoDB coordinates queue execution.
+  Supabase is YallaQueue's business database and authentication system.
+- **What happens after a failure?** Lambda reports only failed batch records;
+  SQS retries them and eventually moves repeated failures to the DLQ.
+- **What is the honest limit?** QueueCraft is a tested public alpha for
+  controlled pilots, not a production-proven exactly-once system.
+
 ## One-minute recording script
 
 Start with the repository README already open. Keep credentials, account IDs,
@@ -59,7 +103,7 @@ context. The stack is then deleted.”
 
 Show the npm page and GitHub repository.
 
-“QueueCraft 0.3.0 is public on npm with 83 automated tests. It is an honest
+“QueueCraft 0.3.1 is public on npm with 99 automated tests. It is an honest
 public alpha, and my next step is validating it in controlled pilots.”
 
 ## Resume bullet
@@ -67,7 +111,7 @@ public alpha, and my next step is validating it in controlled pilots.”
 Built and published QueueCraft, a TypeScript toolkit for AWS SQS job processing
 with bounded concurrency, DynamoDB-backed duplicate suppression, retries and
 DLQ handling, CloudWatch observability, and W3C trace propagation; verified by
-83 automated tests and isolated real-AWS CI.
+99 automated tests and isolated real-AWS CI.
 
 ## LinkedIn draft
 
@@ -76,7 +120,7 @@ reusable TypeScript toolkit for moving slow or failure-prone work into Amazon
 SQS, with DynamoDB-backed duplicate suppression, retries and DLQ handling,
 CloudWatch monitoring, and W3C trace propagation.
 
-Version 0.3.0 is public on npm. I verified successful processing, duplicate
+Version 0.3.1 is public on npm. I verified successful processing, duplicate
 suppression, failure handling, DLQ redrive, and trace-context survival against
 isolated real AWS resources through GitHub Actions.
 

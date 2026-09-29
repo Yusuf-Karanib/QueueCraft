@@ -18,7 +18,7 @@ example proves that QueueCraft is not tied to one application.
 
 ## Status
 
-QueueCraft `0.3.0` is feature-complete for its portfolio scope and is maintained
+QueueCraft `0.3.1` is feature-complete for its portfolio scope and is maintained
 for documentation, dependency, security, and correctness fixes. Its unit-tested
 core and AWS infrastructure are usable for controlled pilots, but it has not
 yet earned a production-ready claim.
@@ -118,7 +118,7 @@ retry.
 npm install @yusufkaranib/queuecraft
 ```
 
-Version `0.3.0` is the current public alpha. Pin the version for controlled pilots
+Version `0.3.1` is the current public alpha. Pin the version for controlled pilots
 and review the changelog before upgrading.
 
 ## Publishing a job
@@ -214,8 +214,8 @@ as failed without trying to settle work under uncertain ownership.
 QueueCraft can turn the same payload-free lifecycle events into CloudWatch
 metrics and OpenTelemetry-compatible spans:
 
-Version `0.3.0` includes `QueueCraftActiveTracing`, W3C trace propagation, and
-the optional AWS operations dashboard.
+Since version `0.3.0`, QueueCraft includes `QueueCraftActiveTracing`, W3C trace
+propagation, and the optional AWS operations dashboard.
 
 For the optional OpenTelemetry example, install its API in the application:
 
