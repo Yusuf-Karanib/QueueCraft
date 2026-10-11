@@ -7,6 +7,29 @@ GitHub test role was removed during the cost shutdown, so the AWS workflow is
 manual-only and cannot run until that role is deliberately restored. Ordinary
 CI continues without AWS credentials or cloud resources.
 
+## 2026-10-12 — maintained portfolio release 0.3.2
+
+Source commit and tag: `de57b45` / `v0.3.2`
+
+GitHub Actions runs:
+
+- [CI `38170551286`](https://github.com/Yusuf-Karanib/QueueCraft/actions/runs/38170551286)
+- [trusted npm publish `38170626400`](https://github.com/Yusuf-Karanib/QueueCraft/actions/runs/38170626400)
+
+Verified behavior:
+
+- PASS: all 118 tests, enforced coverage floors, type checking, building, and
+  package inspection passed;
+- PASS: the CI history-aware secret scan completed without a finding;
+- PASS: full and production-only dependency audits found zero known
+  vulnerabilities;
+- PASS: the version-tag-only workflow published `0.3.2` through npm trusted
+  publishing without a stored npm token;
+- PASS: the public registry reports `0.3.2` as the latest version;
+- PASS: a clean temporary install downloaded exactly `0.3.2` and imported the
+  publisher, poller, Lambda processor, and dashboard APIs;
+- PASS: AWS remained offline and no cloud resources were created.
+
 ## 2026-09-01 — independent order-processing reference
 
 Source commits: `58f8a07` and `68c7a94`
