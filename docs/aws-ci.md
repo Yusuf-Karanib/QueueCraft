@@ -3,6 +3,17 @@
 QueueCraft's AWS workflow uses GitHub OIDC. GitHub receives a short-lived AWS
 session for one workflow run; no AWS access key is stored in GitHub.
 
+## Current offline maintenance state
+
+The `queuecraft-github-trust` stack and its test role were deliberately removed
+on 3 October 2026 to keep AWS offline. The recorded results in
+[`verification.md`](verification.md) are historical evidence.
+
+The workflow is now manual-only. It requires a maintainer to confirm that the
+isolated test role has been restored and that temporary AWS test-resource
+charges are accepted. Until then, leave the confirmation unchecked and use the
+ordinary local and CI checks.
+
 ## Security boundary
 
 The AWS role trusts only:
@@ -53,7 +64,6 @@ It verifies one successful order, one duplicate event, and one poison order
 that reaches the DLQ. The stack name uses the GitHub run and attempt IDs, so it
 cannot target YallaQueue's resources.
 
-The workflow runs automatically when relevant code, tests, dependencies, or AWS
-test infrastructure change on `main`. It can also be started manually from the
-GitHub Actions page. The first passing OIDC-backed run is recorded in
-[`verification.md`](verification.md).
+The workflow is started manually from the GitHub Actions page only after the
+isolated role has been restored. Its first passing OIDC-backed run is recorded
+in [`verification.md`](verification.md).

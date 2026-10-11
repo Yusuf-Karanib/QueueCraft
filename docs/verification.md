@@ -1,5 +1,12 @@
 # Verification record
 
+## Current state — AWS offline since 2026-10-03
+
+The real-AWS results below are retained as historical evidence. The isolated
+GitHub test role was removed during the cost shutdown, so the AWS workflow is
+manual-only and cannot run until that role is deliberately restored. Ordinary
+CI continues without AWS credentials or cloud resources.
+
 ## 2026-09-01 — independent order-processing reference
 
 Source commits: `58f8a07` and `68c7a94`

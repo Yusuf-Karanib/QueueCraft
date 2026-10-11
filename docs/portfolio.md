@@ -93,11 +93,12 @@ same public package, proving the engine is not tied to one app.”
 
 **32–48 seconds — evidence**
 
-Show a completed AWS integration workflow and its four PASS lines.
+Show the recorded completed AWS integration workflow and its four PASS lines.
 
-“Every relevant change creates disposable AWS resources and verifies a real
-successful order, duplicate suppression, retries, DLQ redrive, and trace
-context. The stack is then deleted.”
+"This recorded verification created disposable AWS resources and checked a
+real successful order, duplicate suppression, retries, DLQ redrive, and trace
+context. The stack was then deleted. AWS is currently offline to avoid ongoing
+costs."
 
 **48–60 seconds — close**
 

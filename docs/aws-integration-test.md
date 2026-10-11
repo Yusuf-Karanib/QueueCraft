@@ -16,8 +16,10 @@ Use a separate QueueCraft test stack whose main queue and DLQ are empty.
 
 ## Prepare the test stack
 
-GitHub Actions uses `infrastructure/integration-test.yaml` to create and delete
-an isolated stack automatically. See `docs/aws-ci.md` for that design.
+After its isolated AWS role is deliberately restored, the manual GitHub Actions
+workflow can use `infrastructure/integration-test.yaml` to create and delete an
+isolated stack. See `docs/aws-ci.md` for that design and the current offline
+state.
 
 For a manual run, create a second CloudFormation stack from
 `infrastructure/cloudformation.yaml`.

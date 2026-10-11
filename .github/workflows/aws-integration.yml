@@ -2,18 +2,12 @@ name: AWS integration
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/aws-integration.yml
-      - infrastructure/integration-test.yaml
-      - scripts/aws-integration.mjs
-      - examples/order-processing/**
-      - src/**
-      - test/**
-      - package.json
-      - package-lock.json
-      - tsconfig.json
+    inputs:
+      confirm_aws_test_role_restored:
+        description: I restored the QueueCraft AWS test role and accept temporary test-resource charges.
+        required: true
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -28,6 +22,7 @@ env:
 
 jobs:
   verify-real-aws:
+    if: ${{ inputs.confirm_aws_test_role_restored == true }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:

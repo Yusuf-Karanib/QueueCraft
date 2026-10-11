@@ -1,7 +1,6 @@
 # QueueCraft
 
 [![CI](https://github.com/Yusuf-Karanib/QueueCraft/actions/workflows/ci.yml/badge.svg)](https://github.com/Yusuf-Karanib/QueueCraft/actions/workflows/ci.yml)
-[![AWS integration](https://github.com/Yusuf-Karanib/QueueCraft/actions/workflows/aws-integration.yml/badge.svg)](https://github.com/Yusuf-Karanib/QueueCraft/actions/workflows/aws-integration.yml)
 [![npm](https://img.shields.io/npm/v/%40yusufkaranib%2Fqueuecraft)](https://www.npmjs.com/package/@yusufkaranib/queuecraft)
 [![license](https://img.shields.io/github/license/Yusuf-Karanib/QueueCraft)](LICENSE)
 
@@ -23,9 +22,11 @@ for documentation, dependency, security, and correctness fixes. Its unit-tested
 core and AWS infrastructure are usable for controlled pilots, but it has not
 yet earned a production-ready claim.
 
-Evidence: 99 automated tests, Node.js 20 and 22 CI, and an isolated real-AWS
-workflow covering successful processing, duplicate suppression, failure,
-dead-letter redrive, trace propagation, and stack cleanup. See the
+Evidence: 99 automated tests, Node.js 20 and 22 CI, and recorded isolated
+real-AWS runs covering successful processing, duplicate suppression, failure,
+dead-letter redrive, trace propagation, and stack cleanup. The AWS test role
+was removed during the cost shutdown on 3 October 2026, so real-AWS testing is
+currently manual and unavailable until that isolated role is restored. See the
 [verification record](docs/verification.md).
 
 Implemented:
@@ -38,7 +39,7 @@ Implemented:
 - Bounded graceful shutdown with handler cancellation
 - CloudFormation for a standard queue, DLQ, DynamoDB table, IAM policies, alarms, and an optional private operations dashboard
 - Guarded integration runner verified against real SQS and DynamoDB
-- Automated isolated AWS integration tests with short-lived GitHub OIDC credentials
+- Guarded isolated AWS integration workflow using short-lived GitHub OIDC credentials when enabled
 - Structured, payload-free lifecycle events for logs and metrics
 - Buffered CloudWatch application metrics with bounded dimensions
 - OpenTelemetry-compatible lifecycle tracing without payload attributes
@@ -69,7 +70,7 @@ safe dead-letter metadata with message bodies hidden, and guarded replay.
 
 ![QueueCraft local dashboard using fake data](docs/assets/dashboard.png)
 
-For the real-cloud evidence, open the passing
+For the historical real-cloud evidence, open the passing
 [AWS integration run](https://github.com/Yusuf-Karanib/QueueCraft/actions/runs/33528239353).
 That run created an isolated SQS queue, DLQ, and DynamoDB table, exercised the
 order example, and deleted the complete stack.
@@ -289,10 +290,12 @@ integration test.
 A guarded real-AWS test runner is included in
 [`docs/aws-integration-test.md`](docs/aws-integration-test.md). It must be run
 against a dedicated test stack; it deliberately refuses to use a non-empty
-queue. Its first passing AWS run is recorded in
-[`docs/verification.md`](docs/verification.md). GitHub Actions now creates an
-isolated stack, runs the guarded test, and deletes the stack on relevant changes
-to `main`. The project remains alpha until it has evidence from controlled pilots.
+queue. Its passing AWS runs are recorded in
+[`docs/verification.md`](docs/verification.md). The workflow is manual while
+the AWS test role remains deleted. After that isolated role is deliberately
+restored, a maintainer must confirm the temporary resource cost before a run
+can create the test stack. The project remains alpha until it has evidence from
+controlled pilots.
 
 ## Deploy the AWS resources
 
@@ -312,10 +315,17 @@ suggested metrics. See
 [`docs/yallaqueue-reference.md`](docs/yallaqueue-reference.md) for the first
 end-to-end application built on QueueCraft. The independent
 [`examples/order-processing`](examples/order-processing/README.md) application
-is the second reference and is exercised by the guarded real-AWS workflow.
+is the second reference and was exercised by the recorded guarded real-AWS runs.
 
 For a short case study, resume bullet, and recording script, see
 [`docs/portfolio.md`](docs/portfolio.md).
+
+The maintained capstone evidence is split into the
+[baseline audit](docs/capstone-baseline.md),
+[requirements](docs/capstone-requirements.md),
+[threat model](docs/threat-model.md),
+[verification record](docs/verification.md), and
+[agent-workflow evaluation protocol](docs/agent-evaluation.md).
 
 ## Local dashboard
 
