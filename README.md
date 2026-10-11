@@ -22,12 +22,13 @@ for documentation, dependency, security, and correctness fixes. Its unit-tested
 core and AWS infrastructure are usable for controlled pilots, but it has not
 yet earned a production-ready claim.
 
-Evidence: 118 automated tests, Node.js 20 and 22 CI, and recorded isolated
-real-AWS runs covering successful processing, duplicate suppression, failure,
-dead-letter redrive, trace propagation, and stack cleanup. The AWS test role
-was removed during the cost shutdown on 3 October 2026, so real-AWS testing is
-currently manual and unavailable until that isolated role is restored. See the
-[verification record](docs/verification.md).
+Evidence: 118 automated tests, enforced coverage floors, history-aware secret
+scanning, Node.js 20 and 22 CI, and recorded isolated real-AWS runs covering
+successful processing, duplicate suppression, failure, dead-letter redrive,
+trace propagation, and stack cleanup. The AWS test role was removed during the
+cost shutdown on 3 October 2026, so real-AWS testing is currently manual and
+unavailable until that isolated role is restored. See the [verification
+record](docs/verification.md).
 
 Implemented:
 
@@ -47,6 +48,7 @@ Implemented:
 - Opt-in W3C `traceparent`/`tracestate` continuation from publishers through SQS to workers
 - Loopback-only queue dashboard with body-hidden DLQ metadata and guarded replay
 - Automated checks for Node.js 20 and 22
+- Pinned Gitleaks scanning with full Git history available in CI
 - Public npm package: `@yusufkaranib/queuecraft`
 
 Deliberate limit:

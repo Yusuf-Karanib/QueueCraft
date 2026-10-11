@@ -8,6 +8,9 @@
   agent-evaluation evidence.
 - Add an all-source test-coverage report and enforce conservative coverage
   floors in CI.
+- Add a pinned Gitleaks CI job with full Git history available for secret
+  detection.
+- Remove a timing-sensitive dashboard replay-test failure under parallel load.
 - Make the real-AWS integration workflow manual while its isolated test role is
   intentionally offline.
 - Resolve the development-only `source-map-js` advisory in the lockfile.

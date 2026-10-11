@@ -56,7 +56,7 @@ trace carrier, browser request, package dependency, or CI input.
 | One replay request publishes twice | In-process replay coalescing and cached publish state | A process crash after send but before local state is retained can still cause a repeat |
 | A repository or workflow steals cloud credentials | Minimal workflow permissions, pinned actions, short-lived OIDC | Repository administrators and compromised dependencies remain trusted positions |
 | A leaked npm token publishes malware | npm trusted publishing without a stored token | A compromised trusted workflow or maintainer can still publish |
-| Secrets are committed | `.env*` ignored, security policy, current-tree pattern check | No automated history-aware secret scan is currently enforced |
+| Secrets are committed | `.env*` ignored, security policy, and pinned Gitleaks CI with full Git history | Pattern-based detection can miss an unknown credential format; any real finding still requires rotation |
 | Metrics create unbounded cost or expose identifiers | Bounded built-in dimensions and privacy guidance | Caller-supplied static dimensions can still be unsafe or high-cardinality |
 | A test recreates cloud costs unexpectedly | Real-AWS workflow is manual with explicit confirmation | A confirmed run creates temporary billable resources until cleanup finishes |
 | A development template is treated as production | Template accepts only `dev` and `test`; docs state the boundary | A separate production design and review do not yet exist |

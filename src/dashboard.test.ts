@@ -308,7 +308,9 @@ describe("QueueCraft dashboard", () => {
       );
       await new Promise((resolve) => setTimeout(resolve, 30));
       const second = replay();
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      // Leave enough time for the second localhost request to enter the
+      // in-flight replay path when the suite is running under CPU load.
+      await new Promise((resolve) => setTimeout(resolve, 100));
       releaseDelete();
 
       const responses = await Promise.all([first, second]);

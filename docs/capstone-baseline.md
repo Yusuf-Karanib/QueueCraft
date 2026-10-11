@@ -37,8 +37,9 @@ The build and package checks needed wider local file access because the Codex
 sandbox could not read the parent workspace. That was a sandbox limitation,
 not a QueueCraft failure.
 
-The secret check covered the current tracked tree only. It was not a complete
-Git-history scan, and no dedicated secret-scanning tool is installed locally.
+At the audit checkpoint, the secret check covered the current tracked tree
+only. A later verified Gitleaks 8.30.1 run found no leaks in the current files
+or all 51 commits, and the same scanner is now enforced in CI.
 
 ## Strong evidence already present
 
@@ -115,7 +116,7 @@ These are not reasons to add more features.
 | Threat review | Threat model added with trust boundaries, controls, and residual risks | Review it whenever a trust boundary changes |
 | Test measurement | 118 tests pass; measured coverage is 86.68% statements, 77.60% branches, 89.08% functions, and 88.54% lines; CI floors are 85%, 75%, 85%, and 85% | Raise a floor only when meaningful tests justify it |
 | Static consistency | Type checking exists | Decide whether one lint/format check adds useful evidence |
-| Secret prevention | Current tree check is clean | Add automated current-tree and history-aware secret scanning |
+| Secret prevention | Gitleaks 8.30.1 found no leak in the current files or all 51 commits; a pinned CI job receives full history | Investigate every finding and avoid broad allowlists |
 | Agent evaluation | Controlled plain and structured runs completed from the same commit | Repeat only when a larger real maintenance task justifies the extra cost |
 | Remote repository controls | Recommended in docs | Verify branch protection, tag protection, and npm trusted-publisher settings separately |
 
