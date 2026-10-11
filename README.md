@@ -280,12 +280,15 @@ To work on QueueCraft itself, use Node.js 20 or 22 and run:
 ```bash
 npm ci
 npm test
+npm run test:coverage
 npm run typecheck
 npm run build
 ```
 
-The unit tests mock AWS. Passing them does not replace the guarded real-AWS
-integration test.
+The coverage command measures every TypeScript source file, including files a
+test never loads. CI requires at least 85% statements, 75% branches, 85%
+functions, and 85% lines. The unit tests mock AWS, so passing them does not
+replace the guarded real-AWS integration test.
 
 A guarded real-AWS test runner is included in
 [`docs/aws-integration-test.md`](docs/aws-integration-test.md). It must be run

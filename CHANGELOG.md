@@ -6,6 +6,8 @@
   documented AWS character and length limits before any metric request.
 - Add maintained capstone requirements, threat-review, baseline-audit, and
   agent-evaluation evidence.
+- Add an all-source test-coverage report and enforce conservative coverage
+  floors in CI.
 - Make the real-AWS integration workflow manual while its isolated test role is
   intentionally offline.
 - Resolve the development-only `source-map-js` advisory in the lockfile.

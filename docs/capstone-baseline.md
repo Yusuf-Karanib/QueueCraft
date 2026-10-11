@@ -113,7 +113,7 @@ These are not reasons to add more features.
 | --- | --- | --- |
 | Requirements | Frozen functional, non-functional, evidence, and non-goal baseline added | Keep it synchronized with intentional maintenance changes |
 | Threat review | Threat model added with trust boundaries, controls, and residual risks | Review it whenever a trust boundary changes |
-| Test measurement | 118 tests pass | Record code coverage and choose a sensible threshold rather than claiming test count alone |
+| Test measurement | 118 tests pass; measured coverage is 86.68% statements, 77.60% branches, 89.08% functions, and 88.54% lines; CI floors are 85%, 75%, 85%, and 85% | Raise a floor only when meaningful tests justify it |
 | Static consistency | Type checking exists | Decide whether one lint/format check adds useful evidence |
 | Secret prevention | Current tree check is clean | Add automated current-tree and history-aware secret scanning |
 | Agent evaluation | Controlled plain and structured runs completed from the same commit | Repeat only when a larger real maintenance task justifies the extra cost |
