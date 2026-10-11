@@ -17,7 +17,7 @@ example proves that QueueCraft is not tied to one application.
 
 ## Status
 
-QueueCraft `0.3.1` is feature-complete for its portfolio scope and is maintained
+QueueCraft `0.3.2` is feature-complete for its portfolio scope and is maintained
 for documentation, dependency, security, and correctness fixes. Its unit-tested
 core and AWS infrastructure are usable for controlled pilots, but it has not
 yet earned a production-ready claim.
@@ -121,7 +121,7 @@ retry.
 npm install @yusufkaranib/queuecraft
 ```
 
-Version `0.3.1` is the current public alpha. Pin the version for controlled pilots
+Version `0.3.2` is the current public alpha. Pin the version for controlled pilots
 and review the changelog before upgrading.
 
 ## Publishing a job

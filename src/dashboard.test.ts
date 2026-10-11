@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SQSClient } from "@aws-sdk/client-sqs";
 import { request as httpRequest } from "node:http";
-import { createQueueCraftDashboard } from "./dashboard";
+import {
+  createQueueCraftDashboard,
+  DashboardReplayCoordinator,
+} from "./dashboard";
 
 const MAIN_QUEUE = "https://sqs.eu-central-1.amazonaws.com/123/main";
 const DLQ = "https://sqs.eu-central-1.amazonaws.com/123/main-dlq";
@@ -254,81 +257,36 @@ describe("QueueCraft dashboard", () => {
   });
 
   it("coalesces concurrent replay requests even after the cache entry expires", async () => {
-    let releaseDelete!: () => void;
-    const deleteGate = new Promise<void>((resolve) => {
-      releaseDelete = resolve;
-    });
-    const send = vi.fn(async (command: { constructor: { name: string } }) => {
-      if (command.constructor.name === "ReceiveMessageCommand") {
-        return {
-          Messages: [
-            {
-              MessageId: "failed-1",
-              ReceiptHandle: "receipt-1",
-              Body: '{"private":"payload"}',
-            },
-          ],
-        };
-      }
-      if (command.constructor.name === "DeleteMessageCommand") {
-        await deleteGate;
-      }
-      return {};
-    });
-    const dashboard = await createQueueCraftDashboard({
-      sqsClient: { send } as unknown as SQSClient,
-      queueUrl: MAIN_QUEUE,
-      dlqUrl: DLQ,
-      port: 0,
-      replayCacheTtlMs: 20,
+    let now = 1_000;
+    const replays = new DashboardReplayCoordinator(20, () => now);
+    replays.remember({
+      id: "failed-1",
+      receiptHandle: "receipt-1",
+      body: '{"private":"payload"}',
     });
 
-    try {
-      const page = await fetch(dashboard.url).then((response) => response.text());
-      const writeToken = page.match(/const WRITE_TOKEN="([^"]+)"/)?.[1];
-      await fetch(dashboard.url + "/api/dlq");
-      const replay = () =>
-        requestStatus(dashboard.url + "/api/dlq/replay", {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            origin: dashboard.url,
-            "x-queuecraft-write-token": writeToken!,
-          },
-          body: JSON.stringify({ messageId: "failed-1", confirm: "REPLAY" }),
-        });
+    let releaseReplay!: () => void;
+    const replayGate = new Promise<void>((resolve) => {
+      releaseReplay = resolve;
+    });
+    const firstOperation = vi.fn(async () => {
+      await replayGate;
+    });
+    const secondOperation = vi.fn(async () => {});
 
-      const first = replay();
-      await vi.waitFor(() =>
-        expect(
-          send.mock.calls.filter(
-            ([command]) => command.constructor.name === "DeleteMessageCommand",
-          ),
-        ).toHaveLength(1),
-      );
-      await new Promise((resolve) => setTimeout(resolve, 30));
-      const second = replay();
-      // Leave enough time for the second localhost request to enter the
-      // in-flight replay path when the suite is running under CPU load.
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      releaseDelete();
+    const first = replays.replay("failed-1", firstOperation);
+    expect(firstOperation).toHaveBeenCalledTimes(1);
 
-      const responses = await Promise.all([first, second]);
-      expect(responses).toEqual([200, 200]);
-      expect(
-        send.mock.calls.filter(
-          ([command]) => command.constructor.name === "SendMessageCommand",
-        ),
-      ).toHaveLength(1);
-      expect(
-        send.mock.calls.filter(
-          ([command]) => command.constructor.name === "DeleteMessageCommand",
-        ),
-      ).toHaveLength(1);
-    } finally {
-      releaseDelete();
-      await dashboard.close();
-    }
+    now += 21;
+    const second = replays.replay("failed-1", secondOperation);
+    releaseReplay();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      "replayed",
+      "replayed",
+    ]);
+    expect(firstOperation).toHaveBeenCalledTimes(1);
+    expect(secondOperation).not.toHaveBeenCalled();
   });
 
   it("refuses to expose the dashboard on a non-loopback host", async () => {

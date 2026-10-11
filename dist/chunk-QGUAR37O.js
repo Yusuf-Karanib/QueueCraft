@@ -13,6 +13,54 @@ var DEFAULT_HOST = "127.0.0.1";
 var DEFAULT_PORT = 4173;
 var DEFAULT_CACHE_TTL_MS = 5 * 60 * 1e3;
 var MAX_REQUEST_BYTES = 4096;
+var DashboardReplayCoordinator = class {
+  constructor(cacheTtlMs, now = Date.now) {
+    this.cacheTtlMs = cacheTtlMs;
+    this.now = now;
+  }
+  cacheTtlMs;
+  now;
+  cache = /* @__PURE__ */ new Map();
+  replayFlights = /* @__PURE__ */ new Map();
+  prune() {
+    const now = this.now();
+    for (const [id, message] of this.cache) {
+      if (message.expiresAt <= now) this.cache.delete(id);
+    }
+  }
+  remember(message) {
+    if (this.replayFlights.has(message.id)) return;
+    const previous = this.cache.get(message.id);
+    this.cache.set(message.id, {
+      receiptHandle: message.receiptHandle,
+      body: message.body,
+      attributes: message.attributes,
+      expiresAt: this.now() + this.cacheTtlMs,
+      published: previous?.published ?? false
+    });
+  }
+  async replay(messageId, operation) {
+    const activeReplay = this.replayFlights.get(messageId);
+    if (activeReplay) {
+      await activeReplay;
+      return "replayed";
+    }
+    this.prune();
+    const cached = this.cache.get(messageId);
+    if (!cached) return "missing";
+    const replay = operation(cached);
+    this.replayFlights.set(messageId, replay);
+    try {
+      await replay;
+      this.cache.delete(messageId);
+    } finally {
+      if (this.replayFlights.get(messageId) === replay) {
+        this.replayFlights.delete(messageId);
+      }
+    }
+    return "replayed";
+  }
+};
 var htmlTemplate = [
   "<!doctype html>",
   '<html lang="en">',
@@ -73,8 +121,7 @@ async function createQueueCraftDashboard(options) {
   if (!Number.isInteger(cacheTtlMs) || cacheTtlMs < 1) {
     throw new RangeError("replayCacheTtlMs must be a positive integer.");
   }
-  const cache = /* @__PURE__ */ new Map();
-  const replayFlights = /* @__PURE__ */ new Map();
+  const replayCoordinator = new DashboardReplayCoordinator(cacheTtlMs);
   const writeToken = randomBytes(32).toString("base64url");
   let security;
   const server = createServer(async (request, response) => {
@@ -85,9 +132,7 @@ async function createQueueCraftDashboard(options) {
       }
       await handleRequest(
         options,
-        cache,
-        replayFlights,
-        cacheTtlMs,
+        replayCoordinator,
         security,
         request,
         response
@@ -122,7 +167,7 @@ async function createQueueCraftDashboard(options) {
     })
   };
 }
-async function handleRequest(options, cache, replayFlights, cacheTtlMs, security, request, response) {
+async function handleRequest(options, replayCoordinator, security, request, response) {
   if (!isExpectedHost(request.headers.host, security.origin)) {
     sendJson(response, 403, { error: "Invalid dashboard host." });
     return;
@@ -165,7 +210,7 @@ async function handleRequest(options, cache, replayFlights, cacheTtlMs, security
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/dlq") {
-    removeExpired(cache);
+    replayCoordinator.prune();
     const result = await options.sqsClient.send(
       new ReceiveMessageCommand({
         QueueUrl: options.dlqUrl,
@@ -181,16 +226,12 @@ async function handleRequest(options, cache, replayFlights, cacheTtlMs, security
     );
     const messages = (result.Messages ?? []).flatMap((message) => {
       if (!message.MessageId || !message.ReceiptHandle) return [];
-      if (!replayFlights.has(message.MessageId)) {
-        const previous = cache.get(message.MessageId);
-        cache.set(message.MessageId, {
-          receiptHandle: message.ReceiptHandle,
-          body: message.Body ?? "",
-          attributes: message.MessageAttributes,
-          expiresAt: Date.now() + cacheTtlMs,
-          published: previous?.published ?? false
-        });
-      }
+      replayCoordinator.remember({
+        id: message.MessageId,
+        receiptHandle: message.ReceiptHandle,
+        body: message.Body ?? "",
+        attributes: message.MessageAttributes
+      });
       return [{
         id: message.MessageId,
         receiveCount: Number(message.Attributes?.ApproximateReceiveCount ?? "1"),
@@ -207,27 +248,13 @@ async function handleRequest(options, cache, replayFlights, cacheTtlMs, security
       sendJson(response, 400, { error: "Replay requires messageId and confirm=REPLAY." });
       return;
     }
-    const activeReplay = replayFlights.get(body.messageId);
-    if (activeReplay) {
-      await activeReplay;
-      sendJson(response, 200, { replayed: true });
-      return;
-    }
-    removeExpired(cache);
-    const cached = cache.get(body.messageId);
-    if (!cached) {
+    const result = await replayCoordinator.replay(
+      body.messageId,
+      (cached) => replayCachedMessage(options, cached)
+    );
+    if (result === "missing") {
       sendJson(response, 409, { error: "Refresh the DLQ before replaying this job." });
       return;
-    }
-    const replay = replayCachedMessage(options, cached);
-    replayFlights.set(body.messageId, replay);
-    try {
-      await replay;
-      cache.delete(body.messageId);
-    } finally {
-      if (replayFlights.get(body.messageId) === replay) {
-        replayFlights.delete(body.messageId);
-      }
     }
     sendJson(response, 200, { replayed: true });
     return;
@@ -250,12 +277,6 @@ async function getQueueCounts(client, queueUrl) {
     inFlight: Number(result.Attributes?.ApproximateNumberOfMessagesNotVisible ?? "0"),
     delayed: Number(result.Attributes?.ApproximateNumberOfMessagesDelayed ?? "0")
   };
-}
-function removeExpired(cache) {
-  const now = Date.now();
-  for (const [id, message] of cache) {
-    if (message.expiresAt <= now) cache.delete(id);
-  }
 }
 async function replayCachedMessage(options, cached) {
   if (!cached.published) {

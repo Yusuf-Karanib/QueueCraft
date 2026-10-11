@@ -14,7 +14,7 @@ be specified, tested, reviewed, secured, observed, and explained.
 
 ## Current operating state
 
-- Package version `0.3.1` is public on npm.
+- Package version `0.3.2` is public on npm.
 - The repository is maintained as a public alpha.
 - AWS is offline to avoid ongoing charges.
 - Real-AWS results in `verification.md` are historical evidence.

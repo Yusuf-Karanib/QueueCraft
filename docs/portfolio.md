@@ -104,7 +104,7 @@ costs."
 
 Show the npm page and GitHub repository.
 
-“QueueCraft 0.3.1 is public on npm, and the maintained repository passes 118
+“QueueCraft 0.3.2 is public on npm, and the maintained repository passes 118
 automated tests. It is an honest public alpha, and my next step is validating
 it in controlled pilots.”
 
@@ -122,7 +122,7 @@ reusable TypeScript toolkit for moving slow or failure-prone work into Amazon
 SQS, with DynamoDB-backed duplicate suppression, retries and DLQ handling,
 CloudWatch monitoring, and W3C trace propagation.
 
-Version 0.3.1 is public on npm. I verified successful processing, duplicate
+Version 0.3.2 is public on npm. I verified successful processing, duplicate
 suppression, failure handling, DLQ redrive, and trace-context survival against
 isolated real AWS resources through GitHub Actions.
 

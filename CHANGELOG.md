@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.2 — 2026-10-12
 
 - Validate CloudWatch namespaces and dimension names and values locally against
   documented AWS character and length limits before any metric request.
