@@ -104,15 +104,16 @@ costs."
 
 Show the npm page and GitHub repository.
 
-“QueueCraft 0.3.1 is public on npm with 99 automated tests. It is an honest
-public alpha, and my next step is validating it in controlled pilots.”
+“QueueCraft 0.3.1 is public on npm, and the maintained repository passes 118
+automated tests. It is an honest public alpha, and my next step is validating
+it in controlled pilots.”
 
 ## Resume bullet
 
 Built and published QueueCraft, a TypeScript toolkit for AWS SQS job processing
 with bounded concurrency, DynamoDB-backed duplicate suppression, retries and
 DLQ handling, CloudWatch observability, and W3C trace propagation; verified by
-99 automated tests and isolated real-AWS CI.
+118 automated tests and recorded isolated real-AWS CI.
 
 ## LinkedIn draft
 

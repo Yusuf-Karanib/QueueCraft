@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Validate CloudWatch namespaces and dimension names and values locally against
+  documented AWS character and length limits before any metric request.
+- Add maintained capstone requirements, threat-review, baseline-audit, and
+  agent-evaluation evidence.
+- Make the real-AWS integration workflow manual while its isolated test role is
+  intentionally offline.
+- Resolve the development-only `source-map-js` advisory in the lockfile.
+
 ## 0.3.1 — 2026-09-13
 
 - Hardened the loopback dashboard against DNS rebinding, cross-site writes,

@@ -1,7 +1,11 @@
 # QueueCraft agent-workflow evaluation
 
-Status: frozen protocol for the comparison  
+Status: frozen protocol; comparison completed
 Date: 11 October 2026
+
+The protocol below was frozen before either run. See the
+[recorded result](agent-evaluation-results.md) for the scores, evidence, and
+decision.
 
 ## Question
 

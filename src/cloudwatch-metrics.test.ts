@@ -192,4 +192,83 @@ describe("CloudWatch metrics", () => {
       ),
     ).toThrow("at most 29 entries");
   });
+
+  it.each([
+    ["an empty string", ""],
+    ["a leading colon", ":QueueCraft"],
+    ["a control character", "QueueCraft\nMetrics"],
+    ["a non-ASCII character", "QueueCraft/é"],
+    ["more than 255 characters", "N".repeat(256)],
+  ])("rejects a namespace with %s", (_case, namespace) => {
+    const client = { send: vi.fn() } as unknown as QueueCraftCloudWatchClient;
+
+    expect(
+      () => new QueueCraftCloudWatchMetrics({ client, namespace }),
+    ).toThrow(RangeError);
+  });
+
+  it("accepts namespace length boundaries", () => {
+    const client = { send: vi.fn() } as unknown as QueueCraftCloudWatchClient;
+
+    expect(
+      () => new QueueCraftCloudWatchMetrics({ client, namespace: "N" }),
+    ).not.toThrow();
+    expect(
+      () =>
+        new QueueCraftCloudWatchMetrics({
+          client,
+          namespace: "N".repeat(255),
+        }),
+    ).not.toThrow();
+  });
+
+  it.each([
+    ["an empty name", { "": "value" }],
+    ["a whitespace-only name", { " ": "value" }],
+    ["a name starting with a colon", { ":Name": "value" }],
+    ["a control character in the name", { "Na\nme": "value" }],
+    ["a non-ASCII name", { "Náme": "value" }],
+    ["a name longer than 255 characters", { ["N".repeat(256)]: "value" }],
+    ["an empty value", { Name: "" }],
+    ["a whitespace-only value", { Name: " " }],
+    ["a control character in the value", { Name: "val\nue" }],
+    ["a non-ASCII value", { Name: "válue" }],
+    ["a value longer than 1,024 characters", { Name: "V".repeat(1_025) }],
+  ])("rejects a dimension with %s", (_case, dimensions) => {
+    expect(() =>
+      mapQueueCraftEventToCloudWatchMetrics(
+        { type: "messages_received", count: 1 },
+        { dimensions },
+      ),
+    ).toThrow(RangeError);
+  });
+
+  it("accepts dimension length boundaries", () => {
+    const name = "N".repeat(255);
+    const value = "V".repeat(1_024);
+
+    const metrics = mapQueueCraftEventToCloudWatchMetrics(
+      { type: "messages_received", count: 1 },
+      { dimensions: { [name]: value, A: "B" } },
+    );
+
+    expect(metrics[0].Dimensions).toEqual([
+      { Name: name, Value: value },
+      { Name: "A", Value: "B" },
+    ]);
+  });
+
+  it("rejects invalid dimensions during construction without calling AWS", () => {
+    const send = vi.fn();
+    const client = { send } as unknown as QueueCraftCloudWatchClient;
+
+    expect(
+      () =>
+        new QueueCraftCloudWatchMetrics({
+          client,
+          dimensions: { Name: "V".repeat(1_025) },
+        }),
+    ).toThrow(RangeError);
+    expect(send).not.toHaveBeenCalled();
+  });
 });

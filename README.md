@@ -22,7 +22,7 @@ for documentation, dependency, security, and correctness fixes. Its unit-tested
 core and AWS infrastructure are usable for controlled pilots, but it has not
 yet earned a production-ready claim.
 
-Evidence: 99 automated tests, Node.js 20 and 22 CI, and recorded isolated
+Evidence: 118 automated tests, Node.js 20 and 22 CI, and recorded isolated
 real-AWS runs covering successful processing, duplicate suppression, failure,
 dead-letter redrive, trace propagation, and stack cleanup. The AWS test role
 was removed during the cost shutdown on 3 October 2026, so real-AWS testing is
@@ -325,7 +325,9 @@ The maintained capstone evidence is split into the
 [requirements](docs/capstone-requirements.md),
 [threat model](docs/threat-model.md),
 [verification record](docs/verification.md), and
-[agent-workflow evaluation protocol](docs/agent-evaluation.md).
+[agent-workflow evaluation protocol](docs/agent-evaluation.md). The completed
+[agent-workflow comparison](docs/agent-evaluation-results.md) records what was
+tested, what was adopted, and why no workflow package was installed globally.
 
 ## Local dashboard
 

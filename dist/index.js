@@ -1414,6 +1414,10 @@ var DEFAULT_FLUSH_INTERVAL_MS = 1e4;
 var DEFAULT_MAX_PENDING_METRICS = 1e4;
 var MAX_METRICS_PER_REQUEST = 1e3;
 var MAX_USER_DIMENSIONS = 29;
+var MAX_NAMESPACE_LENGTH = 255;
+var MAX_DIMENSION_NAME_LENGTH = 255;
+var MAX_DIMENSION_VALUE_LENGTH = 1024;
+var PRINTABLE_ASCII_PATTERN = /^[\x20-\x7e]+$/;
 function mapQueueCraftEventToCloudWatchMetrics(event, options = {}) {
   validateDimensions(options.dimensions);
   const dimensions = toDimensions(options.dimensions);
@@ -1583,7 +1587,21 @@ var QueueCraftCloudWatchMetrics = class {
     }
   }
   validateOptions(dimensions) {
-    if (!this.namespace.trim() || this.namespace.startsWith("AWS/")) {
+    if (!this.namespace.trim()) {
+      throw new RangeError("namespace must be non-empty.");
+    }
+    if (this.namespace.length > MAX_NAMESPACE_LENGTH) {
+      throw new RangeError("namespace must contain at most 255 characters.");
+    }
+    if (!PRINTABLE_ASCII_PATTERN.test(this.namespace)) {
+      throw new RangeError(
+        "namespace must contain only printable ASCII characters; control and non-ASCII characters are not supported."
+      );
+    }
+    if (this.namespace.startsWith(":")) {
+      throw new RangeError("namespace must not start with a colon.");
+    }
+    if (this.namespace.startsWith("AWS/")) {
       throw new RangeError(
         "namespace must be non-empty and must not start with the reserved AWS/ prefix."
       );
@@ -1610,6 +1628,27 @@ function validateDimensions(dimensions) {
   for (const [name, value] of entries) {
     if (!name.trim() || !value.trim()) {
       throw new RangeError("dimension names and values must be non-empty.");
+    }
+    if (name.length > MAX_DIMENSION_NAME_LENGTH) {
+      throw new RangeError("dimension names must contain at most 255 characters.");
+    }
+    if (!PRINTABLE_ASCII_PATTERN.test(name)) {
+      throw new RangeError(
+        "dimension names must contain only printable ASCII characters; control and non-ASCII characters are not supported."
+      );
+    }
+    if (name.startsWith(":")) {
+      throw new RangeError("dimension names must not start with a colon.");
+    }
+    if (value.length > MAX_DIMENSION_VALUE_LENGTH) {
+      throw new RangeError(
+        "dimension values must contain at most 1,024 characters."
+      );
+    }
+    if (!PRINTABLE_ASCII_PATTERN.test(value)) {
+      throw new RangeError(
+        "dimension values must contain only printable ASCII characters; control and non-ASCII characters are not supported."
+      );
     }
   }
 }

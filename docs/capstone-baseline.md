@@ -29,6 +29,10 @@ product features.
 | Full dependency audit | Passed with zero known vulnerabilities after the lockfile fix |
 | Current tracked-file secret-pattern check | No high-confidence secret pattern found |
 
+After this audit, the selected CloudWatch validation patch raised the current
+suite to 118 passing tests. The fixed comparison and its final verification are
+recorded in the [agent-workflow evaluation result](agent-evaluation-results.md).
+
 The build and package checks needed wider local file access because the Codex
 sandbox could not read the parent workspace. That was a sandbox limitation,
 not a QueueCraft failure.
@@ -109,21 +113,20 @@ These are not reasons to add more features.
 | --- | --- | --- |
 | Requirements | Frozen functional, non-functional, evidence, and non-goal baseline added | Keep it synchronized with intentional maintenance changes |
 | Threat review | Threat model added with trust boundaries, controls, and residual risks | Review it whenever a trust boundary changes |
-| Test measurement | 99 tests pass | Record code coverage and choose a sensible threshold rather than claiming test count alone |
+| Test measurement | 118 tests pass | Record code coverage and choose a sensible threshold rather than claiming test count alone |
 | Static consistency | Type checking exists | Decide whether one lint/format check adds useful evidence |
 | Secret prevention | Current tree check is clean | Add automated current-tree and history-aware secret scanning |
-| Agent evaluation | Fixed task, controls, rubric, and result template added | Run both approaches from the same clean commit |
+| Agent evaluation | Controlled plain and structured runs completed from the same commit | Repeat only when a larger real maintenance task justifies the extra cost |
 | Remote repository controls | Recommended in docs | Verify branch protection, tag protection, and npm trusted-publisher settings separately |
 
-## Small issue for the later agent-workflow comparison
+## Completed agent-workflow comparison
 
-Use CloudWatch option validation as the fixed comparison task.
+CloudWatch option validation was used as the fixed comparison task.
 
-QueueCraft currently rejects empty dimensions and too many dimensions, but it
-does not enforce all CloudWatch API limits before buffering a metric. For
-example, CloudWatch dimension names must be ASCII, cannot start with `:`, and
-are limited to 255 characters. Values must be ASCII and are limited to 1,024
-characters. The namespace also has AWS character and length restrictions.
+Before the comparison, QueueCraft rejected empty dimensions and too many
+dimensions but did not enforce all CloudWatch API limits before buffering a
+metric. The selected patch now validates documented character and length limits
+locally, before any AWS request.
 
 Official API references:
 
@@ -133,7 +136,7 @@ Official API references:
 This is a suitable comparison issue because it is real, small, testable, and
 does not change QueueCraft's product scope.
 
-Proposed acceptance criteria:
+Acceptance criteria met:
 
 - invalid namespaces fail during construction with a clear error;
 - invalid dimension names and values fail before any AWS request;
@@ -142,14 +145,11 @@ Proposed acceptance criteria:
 - all existing tests, type checking, build, package inspection, and both
   dependency audits pass afterward.
 
-Do not implement this comparison task until the evaluation rubric is frozen.
-Otherwise, the two approaches will not be compared against the same target.
-
-## Recommended order
-
-1. Run the same CloudWatch validation issue once with plain Codex and once with
-   the selected structured workflow.
-2. Compare correctness, tests, review findings, time, and unnecessary changes.
+The plain run scored 98/100 and the structured run scored 94/100. The plain run
+was selected because it produced more complete boundary tests with less time
+and context. The structured run's explicit self-review was still useful, so
+that habit was retained without installing a workflow package globally. See the
+[full comparison result](agent-evaluation-results.md).
 
 ## Scope guard
 
