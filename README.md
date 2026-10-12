@@ -30,6 +30,11 @@ cost shutdown on 3 October 2026, so real-AWS testing is currently manual and
 unavailable until that isolated role is restored. See the [verification
 record](docs/verification.md).
 
+The mistakes were useful too. The [failures and lessons](docs/failures-and-lessons.md)
+case study explains the lease-boundary bug, incorrect SQS retry assumption, AWS
+bootstrap permission trap, npm packaging issue, and timing-dependent test that
+shaped the current design.
+
 Implemented:
 
 - SQS publisher with caller-controlled idempotency keys
@@ -325,11 +330,12 @@ is the second reference and was exercised by the recorded guarded real-AWS runs.
 For a short case study, resume bullet, and recording script, see
 [`docs/portfolio.md`](docs/portfolio.md).
 
-The maintained capstone evidence is split into the
+The maintained capstone evidence includes the
 [baseline audit](docs/capstone-baseline.md),
 [requirements](docs/capstone-requirements.md),
 [threat model](docs/threat-model.md),
-[verification record](docs/verification.md), and
+[verification record](docs/verification.md),
+[failures and lessons](docs/failures-and-lessons.md), and the
 [agent-workflow evaluation protocol](docs/agent-evaluation.md). The completed
 [agent-workflow comparison](docs/agent-evaluation-results.md) records what was
 tested, what was adopted, and why no workflow package was installed globally.
