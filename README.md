@@ -30,10 +30,10 @@ cost shutdown on 3 October 2026, so real-AWS testing is currently manual and
 unavailable until that isolated role is restored. See the [verification
 record](docs/verification.md).
 
-The mistakes were useful too. The [failures and lessons](docs/failures-and-lessons.md)
-case study explains the lease-boundary bug, incorrect SQS retry assumption, AWS
-bootstrap permission trap, npm packaging issue, and timing-dependent test that
-shaped the current design.
+The mistakes were useful too. The chronological [failures and
+lessons](docs/failures-and-lessons.md) case study traces seven real problems
+from the prototype's accidental self-dependency through retry identity, npm and
+AWS verification, lease timing, and deterministic testing.
 
 Implemented:
 

@@ -1,41 +1,133 @@
-# Failures and lessons
+# Failures and lessons: a chronological build record
 
 QueueCraft was not built by following one perfect tutorial from start to finish.
-Several assumptions failed during tests, packaging, CI, and real-AWS
-verification. This page records the important ones and what I changed because
-of them.
+Several assumptions failed during design, packaging, AWS verification, and CI.
+This is the roadmap as it actually happened: each failure changed what I built
+or how I verify it.
 
 These were development failures and pre-production near misses, not customer
 outages. QueueCraft is a public alpha and has no claimed commercial production
 traffic. I would rather show real evidence than invent a dramatic incident that
 did not happen.
 
-## 1. A one-second lease could last about one millisecond
+## Timeline from prototype to maintained alpha
+
+| Date | Stage | Failure | Lasting change |
+| --- | --- | --- | --- |
+| 23 Jul 2026 | Package setup | QueueCraft briefly depended on itself | Inspect the package manifest and test installation separately from compilation |
+| 23 Aug 2026 | Core correctness | A new idempotency key was generated for every publish | Let the source application provide a stable event ID |
+| 31 Aug 2026 | First npm release | Source tests did not verify the packed dashboard command | Inspect and install the exact npm archive before release |
+| 31 Aug 2026 | AWS automation | The temporary bootstrap role could not complete its own checks | Give bootstrap identities only the required validation permissions, then remove them |
+| 1 Sep 2026 | Real-AWS verification | The test confused SQS deliveries with handler executions | Assert each service boundary independently |
+| 13 Sep 2026 | Distributed-systems hardening | A one-second lease could last about one millisecond | Test time boundaries, ownership, and renewal explicitly |
+| 11–12 Oct 2026 | Maintenance | A test depended on real sleeps and machine speed | Inject time and test state transitions deterministically |
+
+## 1. July 2026 — I accidentally made the package depend on itself
 
 **What went wrong**
 
-The DynamoDB lease deadline originally converted milliseconds to seconds by
-rounding down, then added the configured lease duration. If a one-second lease
-started at `xx:xx:xx.999`, its stored deadline could arrive about one
-millisecond later instead of one second later. Another worker could then believe
-the first worker had lost ownership.
+While setting up the first package build, I added the QueueCraft GitHub
+repository to QueueCraft's own runtime dependencies. In plain language, the
+package was asking npm to install another copy of itself. The source still
+compiled, so a build-only check did not expose how confusing the installation
+graph had become.
 
 **What I changed**
 
-I changed deadline calculation to round the deadline up and added a boundary
-test using a timestamp ending in `999` milliseconds. Lease acquisition and
-renewal now receive at least the configured duration.
+I removed the self-dependency in the next packaging change and kept only the
+AWS SDK clients that the library actually uses.
 
 **What I learned**
 
-Distributed-system bugs often live at time-unit boundaries. A formula can look
-correct with normal timestamps and still fail at the last millisecond of a
-second. Time, leases, retries, and ownership need boundary tests, not only happy
-paths.
+A successful compiler run does not prove a package is installable. The package
+manifest is part of the product and deserves its own review, archive inspection,
+and clean-install check.
 
-Evidence: [processing-hardening commit](https://github.com/Yusuf-Karanib/QueueCraft/commit/9bc64e613b4304d1b56b6b8b4942d61cbefca835)
+Evidence: [manifest containing the self-dependency](https://github.com/Yusuf-Karanib/QueueCraft/commit/77866678f5b2a3ed38df40f6aa1d17619736fabb) and [cleanup commit](https://github.com/Yusuf-Karanib/QueueCraft/commit/5b0d70dbeaa688a19d6cb616ecd393be3a89e54e)
 
-## 2. I confused SQS deliveries with handler executions
+## 2. August 2026 — My first idempotency key changed on every retry
+
+**What went wrong**
+
+The first publisher always generated a random UUID inside `publish()`. That
+looked unique, but uniqueness was not the real requirement. If a webhook sender
+retried the same logical event, calling `publish()` again created a different
+key. DynamoDB would correctly see two different keys and could not recognize
+them as the same job.
+
+The early code comment also used the phrase “exactly once,” which was stronger
+than an SQS-based system could honestly promise.
+
+**What I changed**
+
+I added a caller-provided `idempotencyKey`, tested that it is preserved, and
+documented that applications should use a stable source identifier such as a
+WhatsApp message ID. A generated UUID remains only as a fallback for work that
+will never be republished as the same logical job. I also changed the public
+claim from exactly-once processing to duplicate suppression on top of SQS
+at-least-once delivery.
+
+**What I learned**
+
+Idempotency is about stable identity, not random uniqueness. The system where
+an event begins usually knows its identity better than a queue library does.
+Reliability claims must describe the whole distributed workflow, not only one
+database write.
+
+Evidence: [original publisher](https://github.com/Yusuf-Karanib/QueueCraft/commit/5b0d70dbeaa688a19d6cb616ecd393be3a89e54e) and [idempotency hardening](https://github.com/Yusuf-Karanib/QueueCraft/commit/46853482a574605e6323ee1a36021402efdafe1a)
+
+## 3. August 2026 — Passing source tests did not prove the npm package worked
+
+**What went wrong**
+
+QueueCraft's library tests could pass while the installed command-line
+dashboard still depended on package metadata and the exact files inside the npm
+archive. Before the first public alpha, release inspection found that the
+dashboard command's packaged `bin` path needed to change from
+`./dist/dashboard-cli.js` to `dist/dashboard-cli.js`.
+
+**What I changed**
+
+I corrected the package metadata and made `npm pack`, trusted publishing, and a
+clean anonymous installation part of release verification. The clean install
+checks the public API and dashboard command from the same artifact a user gets.
+
+**What I learned**
+
+The repository is not the product; the published archive is. Library tests,
+builds, package inspection, and clean installation answer different questions,
+so a release needs all four.
+
+Evidence: [package-command fix](https://github.com/Yusuf-Karanib/QueueCraft/commit/4d9df0e11d1b22760adde8ec3122113e16aa25ea) and [release verification](verification.md)
+
+## 4. August 2026 — The AWS bootstrap role could not inspect itself
+
+**What went wrong**
+
+I used a temporary GitHub OIDC role to create the permanent, restricted AWS test
+role. The bootstrap workflow also checked its own IAM capabilities before doing
+that work. The first policy could create and manage the target role, but it did
+not include every read-only IAM action used by its self-checks.
+
+This produced a useful least-privilege trap: a role may have enough permission
+to perform its main action while still lacking permission to prove what it can
+do.
+
+**What I changed**
+
+I added only the missing self-inspection actions, completed the capability
+checks, created the permanent restricted role, and then deleted the temporary
+bootstrap workflow and template.
+
+**What I learned**
+
+Bootstrap permissions and runtime permissions are different security problems.
+A bootstrap identity should be short-lived, narrowly scoped, able to validate
+its assumptions, and removed when its one job is complete.
+
+Evidence: [self-inspection fix](https://github.com/Yusuf-Karanib/QueueCraft/commit/718ae16f024f3a29a36af27d427e4f3c65e4827e), [completed capability checks](https://github.com/Yusuf-Karanib/QueueCraft/commit/4ccc74c9e5780025157780a39f6bda038ba9fdba), and [bootstrap removal](https://github.com/Yusuf-Karanib/QueueCraft/commit/42c4744b3e46e3aa69b8a6c30656c304b5177ead)
+
+## 5. September 2026 — I confused SQS deliveries with handler executions
 
 **What went wrong**
 
@@ -63,57 +155,32 @@ not the same measurement.
 
 Evidence: [redrive-assertion correction](https://github.com/Yusuf-Karanib/QueueCraft/commit/68c7a94685f1a4223c3e278d16d753d46e4f0957)
 
-## 3. The AWS bootstrap role could not inspect itself
+## 6. September 2026 — A one-second lease could last about one millisecond
 
 **What went wrong**
 
-I used a temporary GitHub OIDC role to create the permanent, restricted AWS test
-role. The bootstrap workflow also checked its own IAM capabilities before doing
-that work. The first policy could create and manage the target role, but it did
-not include every read-only IAM action used by its self-checks.
-
-This produced a useful least-privilege trap: a role may have enough permission
-to perform its main action while still lacking permission to prove what it can
-do.
+The DynamoDB lease deadline originally converted milliseconds to seconds by
+rounding down, then added the configured lease duration. If a one-second lease
+started at `xx:xx:xx.999`, its stored deadline could arrive about one
+millisecond later instead of one second later. Another worker could then believe
+the first worker had lost ownership.
 
 **What I changed**
 
-I added only the missing self-inspection actions, completed the capability
-checks, created the permanent restricted role, and then deleted the temporary
-bootstrap workflow and template.
+I changed deadline calculation to round the deadline up and added a boundary
+test using a timestamp ending in `999` milliseconds. Lease acquisition and
+renewal now receive at least the configured duration.
 
 **What I learned**
 
-Bootstrap permissions and runtime permissions are different security problems.
-A bootstrap identity should be short-lived, narrowly scoped, able to validate
-its assumptions, and removed when its one job is complete.
+Distributed-system bugs often live at time-unit boundaries. A formula can look
+correct with normal timestamps and still fail at the last millisecond of a
+second. Time, leases, retries, and ownership need boundary tests, not only happy
+paths.
 
-Evidence: [self-inspection fix](https://github.com/Yusuf-Karanib/QueueCraft/commit/718ae16f024f3a29a36af27d427e4f3c65e4827e), [completed capability checks](https://github.com/Yusuf-Karanib/QueueCraft/commit/4ccc74c9e5780025157780a39f6bda038ba9fdba), and [bootstrap removal](https://github.com/Yusuf-Karanib/QueueCraft/commit/42c4744b3e46e3aa69b8a6c30656c304b5177ead)
+Evidence: [processing-hardening commit](https://github.com/Yusuf-Karanib/QueueCraft/commit/9bc64e613b4304d1b56b6b8b4942d61cbefca835)
 
-## 4. Passing source tests did not prove the npm package worked
-
-**What went wrong**
-
-QueueCraft's library tests could pass while the installed command-line
-dashboard still depended on package metadata and the exact files inside the npm
-archive. The dashboard command needed its packaged `bin` path corrected from
-`./dist/dashboard-cli.js` to `dist/dashboard-cli.js`.
-
-**What I changed**
-
-I corrected the package metadata and made `npm pack`, trusted publishing, and a
-clean anonymous installation part of release verification. The clean install
-checks the public API and dashboard command from the same artifact a user gets.
-
-**What I learned**
-
-The repository is not the product; the published archive is. Library tests,
-builds, package inspection, and clean installation answer different questions,
-so a release needs all four.
-
-Evidence: [package-command fix](https://github.com/Yusuf-Karanib/QueueCraft/commit/4d9df0e11d1b22760adde8ec3122113e16aa25ea) and [release verification](verification.md)
-
-## 5. Making a flaky test wait longer did not fix it
+## 7. October 2026 — Making a flaky test wait longer did not fix it
 
 **What went wrong**
 
@@ -142,16 +209,16 @@ Evidence: [initial timing adjustment](https://github.com/Yusuf-Karanib/QueueCraf
 
 ## The working method I kept
 
-These failures led to a repeatable process:
+The roadmap above changed my process:
 
 1. Reproduce the failure and separate application behavior from test or
    environment behavior.
 2. Write down the exact assumption that was wrong.
 3. Fix the boundary where that assumption entered the system.
 4. Add a deterministic regression check.
-5. Verify the built and published artifact, not only the source tree.
+5. Verify the installed or deployed artifact, not only the source tree.
 6. Keep claims smaller than the evidence.
 
 AI helped with implementation and review, but a suggestion was not accepted as
-proof. Tests, real-AWS runs, package inspection, clean installs, and public CI
-are the evidence used in this repository.
+proof. Tests, real-AWS runs, package inspection, clean installs, commit history,
+and public CI are the evidence used in this repository.
