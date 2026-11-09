@@ -40,6 +40,42 @@ function requestStatus(
 }
 
 describe("QueueCraft dashboard", () => {
+  it.each(["{", "", "null", "[]", "42"])(
+    "returns 400 for an invalid replay body %j without queue calls",
+    async (body) => {
+      const send = vi.fn().mockResolvedValue({});
+      const onError = vi.fn();
+      const dashboard = await createQueueCraftDashboard({
+        sqsClient: { send } as unknown as SQSClient,
+        queueUrl: MAIN_QUEUE,
+        dlqUrl: DLQ,
+        onError,
+        port: 0,
+      });
+      try {
+        const home = await fetch(dashboard.url);
+        expect(home.status).toBe(200);
+        const writeToken = (await home.text()).match(/const WRITE_TOKEN="([^"]+)"/)?.[1];
+        if (!writeToken) throw new Error("Missing dashboard write token.");
+        const response = await fetch(dashboard.url + "/api/dlq/replay", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: dashboard.url,
+            "x-queuecraft-write-token": writeToken,
+          },
+          body,
+        });
+        expect(response.status).toBe(400);
+        await response.text();
+        expect(send).not.toHaveBeenCalled();
+        expect(onError).not.toHaveBeenCalled();
+      } finally {
+        await dashboard.close();
+      }
+    },
+  );
+
   it("shows safe metadata, hides bodies, and replays a cached DLQ job", async () => {
     const send = vi.fn(async (command: { constructor: { name: string }; input: any }) => {
       switch (command.constructor.name) {

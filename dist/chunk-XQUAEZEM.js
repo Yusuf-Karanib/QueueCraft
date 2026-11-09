@@ -244,6 +244,10 @@ async function handleRequest(options, replayCoordinator, security, request, resp
   }
   if (request.method === "POST" && url.pathname === "/api/dlq/replay") {
     const body = await readJson(request);
+    if (body === null) {
+      sendJson(response, 400, { error: "Request body must be a JSON object." });
+      return;
+    }
     if (body.confirm !== "REPLAY" || typeof body.messageId !== "string") {
       sendJson(response, 400, { error: "Replay requires messageId and confirm=REPLAY." });
       return;
@@ -338,9 +342,13 @@ async function readJson(request) {
     chunks.push(buffer);
   }
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      return null;
+    }
+    return body;
   } catch {
-    throw new Error("Request body must be valid JSON.");
+    return null;
   }
 }
 function sendHtml(response, body) {
