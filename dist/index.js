@@ -1,6 +1,6 @@
 import {
   createQueueCraftDashboard
-} from "./chunk-QGUAR37O.js";
+} from "./chunk-XQUAEZEM.js";
 
 // src/publisher.ts
 import {

@@ -322,6 +322,10 @@ async function handleRequest(
   }
   if (request.method === "POST" && url.pathname === "/api/dlq/replay") {
     const body = await readJson(request);
+    if (body === null) {
+      sendJson(response, 400, { error: "Request body must be a JSON object." });
+      return;
+    }
     if (body.confirm !== "REPLAY" || typeof body.messageId !== "string") {
       sendJson(response, 400, { error: "Replay requires messageId and confirm=REPLAY." });
       return;
@@ -434,7 +438,9 @@ function formatTimestamp(value: string | undefined): string | undefined {
     : undefined;
 }
 
-async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
+async function readJson(
+  request: IncomingMessage,
+): Promise<Record<string, unknown> | null> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of request) {
@@ -444,9 +450,13 @@ async function readJson(request: IncomingMessage): Promise<Record<string, unknow
     chunks.push(buffer);
   }
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+    const body: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      return null;
+    }
+    return body as Record<string, unknown>;
   } catch {
-    throw new Error("Request body must be valid JSON.");
+    return null;
   }
 }
 
