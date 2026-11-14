@@ -76,6 +76,96 @@ describe("QueueCraft dashboard", () => {
     },
   );
 
+  it("rejects oversized replay bodies before reading the rest or calling the queue", async () => {
+    const send = vi.fn().mockResolvedValue({});
+    const onError = vi.fn();
+    const dashboard = await createQueueCraftDashboard({
+      sqsClient: { send } as unknown as SQSClient,
+      queueUrl: MAIN_QUEUE,
+      dlqUrl: DLQ,
+      onError,
+      port: 0,
+    });
+
+    try {
+      const page = await fetch(dashboard.url).then((response) => response.text());
+      const writeToken = page.match(/const WRITE_TOKEN="([^"]+)"/)?.[1];
+      if (!writeToken) throw new Error("Missing dashboard write token.");
+
+      const replayUrl = new URL("/api/dlq/replay", dashboard.url);
+      const headers = {
+        "content-type": "application/json",
+        origin: dashboard.url,
+        "x-queuecraft-write-token": writeToken,
+      };
+      const atLimit = JSON.stringify({
+        messageId: "missing",
+        confirm: "REPLAY",
+      }).padEnd(4_096);
+      const atLimitReply = await fetch(replayUrl, {
+        method: "POST",
+        headers,
+        body: atLimit,
+      });
+      expect(atLimitReply.status).toBe(409);
+      await atLimitReply.text();
+
+      const multibyte = JSON.stringify({
+        messageId: "é".repeat(2_060),
+        confirm: "REPLAY",
+      });
+      expect(multibyte.length).toBeLessThan(4_096);
+      expect(Buffer.byteLength(multibyte)).toBeGreaterThan(4_096);
+      const tooLarge = await fetch(replayUrl, {
+        method: "POST",
+        headers,
+        body: multibyte,
+      });
+      expect(tooLarge.status).toBe(413);
+      await expect(tooLarge.json()).resolves.toEqual({
+        error: "Request body is too large.",
+      });
+
+      // Leave both bodies open. A 413 must arrive without waiting for the upload to end.
+      const unfinishedRequests = [
+        { headers: { ...headers, "content-length": "4097" }, firstChunk: "{" },
+        { headers: { ...headers, "transfer-encoding": "chunked" }, firstChunk: atLimit + " " },
+      ];
+      for (const upload of unfinishedRequests) {
+        const reply = await new Promise<{
+          status?: number;
+          connection?: string;
+        }>((resolve, reject) => {
+          const request = httpRequest(
+            replayUrl,
+            { method: "POST", agent: false, headers: upload.headers },
+            (response) => {
+              response.resume();
+              response.once("error", reject);
+              response.once("end", () => {
+                resolve({
+                  status: response.statusCode,
+                  connection: response.headers.connection,
+                });
+                request.destroy();
+              });
+            },
+          );
+          request.setTimeout(1_000, () => {
+            request.destroy(new Error("The dashboard is waiting for the rest of the upload."));
+          });
+          request.once("error", reject);
+          request.write(upload.firstChunk);
+        });
+        expect(reply).toEqual({ status: 413, connection: "close" });
+      }
+      expect(send).not.toHaveBeenCalled();
+      expect(onError).not.toHaveBeenCalled();
+    } finally {
+      await dashboard.close();
+    }
+  });
+
   it("shows safe metadata, hides bodies, and replays a cached DLQ job", async () => {
     const send = vi.fn(async (command: { constructor: { name: string }; input: any }) => {
       switch (command.constructor.name) {
