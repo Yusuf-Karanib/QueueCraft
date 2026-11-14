@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import {
   createQueueCraftDashboard
-} from "./chunk-XQUAEZEM.js";
+} from "./chunk-YPE7DUSG.js";
 
 // src/dashboard-cli.ts
 import { SQSClient } from "@aws-sdk/client-sqs";
