@@ -18,6 +18,7 @@ const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 4173;
 const DEFAULT_CACHE_TTL_MS = 5 * 60 * 1000;
 const MAX_REQUEST_BYTES = 4_096;
+const BODY_TOO_LARGE = Symbol("body too large");
 
 export interface DashboardReplayMessage {
   readonly receiptHandle: string;
@@ -322,6 +323,15 @@ async function handleRequest(
   }
   if (request.method === "POST" && url.pathname === "/api/dlq/replay") {
     const body = await readJson(request);
+    if (body === BODY_TOO_LARGE) {
+      response.setHeader("connection", "close");
+      sendJson(response, 413, { error: "Request body is too large." });
+      return;
+    }
+    if (body === null) {
+      sendJson(response, 400, { error: "Request body must be a JSON object." });
+      return;
+    }
     if (body.confirm !== "REPLAY" || typeof body.messageId !== "string") {
       sendJson(response, 400, { error: "Replay requires messageId and confirm=REPLAY." });
       return;
@@ -434,19 +444,34 @@ function formatTimestamp(value: string | undefined): string | undefined {
     : undefined;
 }
 
-async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
+async function readJson(
+  request: IncomingMessage,
+): Promise<Record<string, unknown> | typeof BODY_TOO_LARGE | null> {
+  const declaredLength = request.headers["content-length"];
+  if (
+    declaredLength !== undefined &&
+    Number(declaredLength) > MAX_REQUEST_BYTES
+  ) {
+    return BODY_TOO_LARGE;
+  }
+
   const chunks: Buffer[] = [];
   let size = 0;
-  for await (const chunk of request) {
+  // Keep the socket open long enough to send the 413 when a stream exceeds the limit.
+  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += buffer.length;
-    if (size > MAX_REQUEST_BYTES) throw new Error("Request body is too large.");
+    if (size > MAX_REQUEST_BYTES) return BODY_TOO_LARGE;
     chunks.push(buffer);
   }
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+    const body: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      return null;
+    }
+    return body as Record<string, unknown>;
   } catch {
-    throw new Error("Request body must be valid JSON.");
+    return null;
   }
 }
 

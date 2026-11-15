@@ -13,6 +13,7 @@ var DEFAULT_HOST = "127.0.0.1";
 var DEFAULT_PORT = 4173;
 var DEFAULT_CACHE_TTL_MS = 5 * 60 * 1e3;
 var MAX_REQUEST_BYTES = 4096;
+var BODY_TOO_LARGE = /* @__PURE__ */ Symbol("body too large");
 var DashboardReplayCoordinator = class {
   constructor(cacheTtlMs, now = Date.now) {
     this.cacheTtlMs = cacheTtlMs;
@@ -244,6 +245,15 @@ async function handleRequest(options, replayCoordinator, security, request, resp
   }
   if (request.method === "POST" && url.pathname === "/api/dlq/replay") {
     const body = await readJson(request);
+    if (body === BODY_TOO_LARGE) {
+      response.setHeader("connection", "close");
+      sendJson(response, 413, { error: "Request body is too large." });
+      return;
+    }
+    if (body === null) {
+      sendJson(response, 400, { error: "Request body must be a JSON object." });
+      return;
+    }
     if (body.confirm !== "REPLAY" || typeof body.messageId !== "string") {
       sendJson(response, 400, { error: "Replay requires messageId and confirm=REPLAY." });
       return;
@@ -329,18 +339,26 @@ function formatTimestamp(value) {
   return Number.isFinite(milliseconds) ? new Date(milliseconds).toISOString() : void 0;
 }
 async function readJson(request) {
+  const declaredLength = request.headers["content-length"];
+  if (declaredLength !== void 0 && Number(declaredLength) > MAX_REQUEST_BYTES) {
+    return BODY_TOO_LARGE;
+  }
   const chunks = [];
   let size = 0;
-  for await (const chunk of request) {
+  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += buffer.length;
-    if (size > MAX_REQUEST_BYTES) throw new Error("Request body is too large.");
+    if (size > MAX_REQUEST_BYTES) return BODY_TOO_LARGE;
     chunks.push(buffer);
   }
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      return null;
+    }
+    return body;
   } catch {
-    throw new Error("Request body must be valid JSON.");
+    return null;
   }
 }
 function sendHtml(response, body) {
