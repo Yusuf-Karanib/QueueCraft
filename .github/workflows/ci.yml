@@ -30,6 +30,7 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
+      - run: npm run dashboard:smoke
       - run: npm test
       - name: Enforce coverage floor
         if: matrix.node-version == 20

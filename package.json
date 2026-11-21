@@ -22,6 +22,7 @@
   "scripts": {
     "build": "tsup src/index.ts src/dashboard-cli.ts --format esm --dts --clean --target node20",
     "dashboard:demo": "npm run build && node scripts/dashboard-demo.mjs",
+    "dashboard:smoke": "node scripts/dashboard-package-smoke.mjs",
     "prepublishOnly": "npm run build",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
