@@ -87,6 +87,7 @@ try {
     contentLength: await observe(async () => (await post(overLimit)).status),
     chunked: await observe(() => chunkedPost(new URL(endpoint, origin), headers, [atLimit, ' ', ' '])),
     multibyte: await observe(async () => (await post(multibyte)).status),
+    streamedMultibyte: await observe(() => chunkedPost(new URL(endpoint, origin), headers, [multibyte])),
   };
   const atLimitCheck = await observe(async () => (await post(atLimit)).status);
   assert.deepEqual(atLimitCheck, { status: 409, queueCalls: 0, serverErrors: 0 });
